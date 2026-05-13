@@ -4,6 +4,7 @@
 
 pub mod allowlist;
 pub mod chunk;
+pub mod client;
 pub mod config;
 pub mod dedup;
 pub mod errors;
