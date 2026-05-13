@@ -15,10 +15,12 @@ pub mod allowlist;
 pub mod chunk;
 pub mod client;
 pub mod config;
+pub mod dispatch;
 pub mod errors;
 pub mod long_poll;
 pub mod mode;
 pub mod types;
+pub mod webhook;
 
 pub use config::TelegramConfig;
 pub use errors::TelegramError;

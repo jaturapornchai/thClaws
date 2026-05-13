@@ -8,7 +8,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::allowlist::Allowlist;
 use super::client::TelegramClient;
+use super::dispatch;
 use super::errors::TelegramError;
 use super::types::Update;
 use crate::cancel::CancelToken;
@@ -23,6 +25,7 @@ const ALLOWED_UPDATE_TYPES: &[&str] = &["message", "channel_post", "callback_que
 pub async fn run(
     client: Arc<TelegramClient>,
     sink: Arc<dyn TelegramUpdateSink>,
+    allowlist: Arc<Allowlist>,
     timeout_secs: u64,
     cancel: CancelToken,
 ) -> Result<(), TelegramError> {
@@ -53,7 +56,7 @@ pub async fn run(
         backoff = Duration::from_millis(500);
         for u in updates {
             offset = offset.max(u.update_id + 1);
-            sink.on_update(u).await;
+            dispatch::route_update(&allowlist, sink.clone(), u).await;
         }
     }
 }
@@ -79,9 +82,10 @@ mod tests {
         let sink = Arc::new(CapturingSink {
             seen: Mutex::new(vec![]),
         });
+        let allowlist = Arc::new(Allowlist::default());
         let cancel = CancelToken::new();
         cancel.cancel();
-        let r = run(client, sink, 30, cancel).await;
+        let r = run(client, sink, allowlist, 30, cancel).await;
         assert!(r.is_ok());
     }
 }
