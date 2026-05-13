@@ -34,6 +34,7 @@ pub mod bootstrap;
 pub mod client;
 pub mod config;
 pub mod filter;
+pub mod mode;
 pub mod protocol;
 pub mod session;
 
@@ -43,5 +44,6 @@ pub use bootstrap::{LineSessionHandle, LineStatus};
 pub use client::{LineClient, LineClientError};
 pub use config::{LineConfig, LineConfigError};
 pub use filter::{clean_for_stream, filter_for_line};
+pub use mode::LineMode;
 pub use protocol::{WsEnvelope, WsIncoming};
 pub use session::LineSession;
