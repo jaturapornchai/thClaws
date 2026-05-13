@@ -94,6 +94,8 @@ The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 
 - **LINE OA bridge — hosted or self-hosted.** Pair via the thClaws relay for a 1-minute setup, or run against your own LINE Official Account with full data sovereignty (Reply API only — no Push). See [docs/line-self-hosted.md](docs/line-self-hosted.md) for the self-hosted setup, including channel-secret HMAC verification, allowlist, and slow-response postback UX.
 
+- **Telegram bot bridge.** Drive the agent from a Telegram bot (BotFather token) — long-polling default, optional webhook for production. Allowlist on numeric Telegram IDs, group `@mention` gating, inline-keyboard approvals. See [docs/telegram-bridge.md](docs/telegram-bridge.md).
+
 ---
 
 ## Installation
