@@ -33,6 +33,7 @@ pub mod approver;
 pub mod bootstrap;
 pub mod client;
 pub mod config;
+pub mod direct;
 pub mod filter;
 pub mod mode;
 pub mod protocol;
