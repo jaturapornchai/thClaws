@@ -22,6 +22,8 @@ pub mod mode;
 pub mod types;
 pub mod webhook;
 
+pub mod spawn;
+
 // `sink` bridges into `shared_session::ShellInput` which is gui-gated
 // (CLI builds have no worker channel). The webhook + long-poll
 // transports remain available in CLI builds for testing.
