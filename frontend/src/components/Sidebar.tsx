@@ -17,6 +17,13 @@ type LineStatus = {
   picture_url?: string;
 };
 
+type TelegramStatus = {
+  state: "connected" | "disconnected";
+  mode?: "long_poll" | "webhook";
+  bind_addr?: string;
+  bot_username?: string;
+};
+
 // Confirmation dialog with two backends. Mirrors `platformConfirm`
 // in FilesView. Desktop (`wry` WebView in `--gui`): the IPC bridge
 // is present, so round-trip through the Rust backend for a real
@@ -106,6 +113,9 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
     server_url: "",
     pending_approvals: 0,
   });
+  const [telegramStatus, setTelegramStatus] = useState<TelegramStatus>({
+    state: "disconnected",
+  });
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -159,6 +169,13 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
           display_name: (msg.display_name as string | undefined) ?? undefined,
           picture_url: (msg.picture_url as string | undefined) ?? undefined,
         });
+      } else if (msg.type === "telegram_status") {
+        setTelegramStatus({
+          state: (msg.state as TelegramStatus["state"]) ?? "disconnected",
+          mode: msg.mode as TelegramStatus["mode"],
+          bind_addr: msg.bind_addr as string | undefined,
+          bot_username: msg.bot_username as string | undefined,
+        });
       }
     });
     // Ask for current SSO + LINE state once at mount. The backend
@@ -166,6 +183,7 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
     // subscriber above renders.
     send({ type: "sso_status" });
     send({ type: "line_status" });
+    send({ type: "telegram_status" });
     return unsub;
   }, []);
 
@@ -328,6 +346,37 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
                 {lineStatus.pending_approvals}
               </span>
             )}
+          </div>
+        </Section>
+      )}
+
+      {/* Telegram bridge pill — visible only when the worker reports
+          the bridge is connected. Mirrors LINE pill shape. */}
+      {telegramStatus.state === "connected" && (
+        <Section title="Telegram">
+          <div
+            className="px-2 py-1 flex items-center gap-1.5"
+            title={`${telegramStatus.bot_username ? `@${telegramStatus.bot_username} · ` : ""}${telegramStatus.mode ?? "long_poll"}${telegramStatus.bind_addr ? ` · ${telegramStatus.bind_addr}` : ""}`}
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ background: "var(--accent)" }}
+              aria-hidden
+            />
+            <span
+              className="truncate"
+              style={{ color: "var(--text-primary)" }}
+            >
+              {telegramStatus.bot_username
+                ? `@${telegramStatus.bot_username}`
+                : "bridge live"}
+            </span>
+            <span
+              className="ml-auto"
+              style={{ color: "var(--text-secondary)", fontSize: "10px" }}
+            >
+              {telegramStatus.mode ?? "long_poll"}
+            </span>
           </div>
         </Section>
       )}

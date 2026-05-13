@@ -948,6 +948,20 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        "telegram_status" => {
+            // First-paint probe. We can't ask the worker thread
+            // directly (no shared mutable state with the IPC dispatch
+            // path here), so we report "disconnected" — the real
+            // status is broadcast via ViewEvent::TelegramStatus when
+            // the worker spawns / cancels the bridge. The GUI keeps
+            // its own state-machine reactive to those broadcasts.
+            let payload = serde_json::json!({
+                "type": "telegram_status",
+                "state": "disconnected",
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "telegram_disconnect" => {
             let _ = ctx
                 .shared
