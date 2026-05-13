@@ -22,6 +22,12 @@ pub mod mode;
 pub mod types;
 pub mod webhook;
 
+// `sink` bridges into `shared_session::ShellInput` which is gui-gated
+// (CLI builds have no worker channel). The webhook + long-poll
+// transports remain available in CLI builds for testing.
+#[cfg(feature = "gui")]
+pub mod sink;
+
 pub use config::TelegramConfig;
 pub use errors::TelegramError;
 pub use mode::TelegramMode;

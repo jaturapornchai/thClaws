@@ -178,6 +178,29 @@ pub enum ShellInput {
         text: String,
         respond: tokio::sync::oneshot::Sender<String>,
     },
+    /// Telegram bridge: GUI/IPC asked to spawn the bot transport
+    /// (long-poll loop or webhook server). Worker stashes the
+    /// `TelegramHandle` on `state.telegram_session` and broadcasts
+    /// `ViewEvent::TelegramStatus`. Mirrors `LineConnect`.
+    TelegramConnect(crate::telegram::TelegramConfig),
+    /// Tear down the live Telegram transport, restore prior approver
+    /// + permission posture, broadcast disconnected status.
+    TelegramDisconnect,
+    /// Telegram user sent a text message (DM or allowed group). The
+    /// long-poll/webhook sink forwards it here; the worker drives a
+    /// turn and fulfils `respond` with the captured final text. The
+    /// sink owns the actual `sendMessage` reply (it knows the
+    /// chat_id and reply target).
+    TelegramMessage {
+        chat_id: i64,
+        reply_to_message_id: Option<i64>,
+        text: String,
+        respond: tokio::sync::oneshot::Sender<String>,
+    },
+    /// Telegram inline-keyboard `callback_query`. `data` is the raw
+    /// callback_data string (e.g. `tool:allow:<req_id>`). Worker
+    /// hands it to `state.telegram_approver` for resolution.
+    TelegramCallback { data: String },
 }
 
 /// What both tabs render. Each variant maps to a UI affordance:
@@ -237,6 +260,11 @@ pub enum ViewEvent {
     /// server_url: "...", pending_approvals: N}`. Emitted on pair /
     /// disconnect and whenever the bridge crosses a state boundary.
     LineStatus(String),
+    /// Telegram bridge status. JSON payload shaped like
+    /// `{type: "telegram_status", state: "connected"|"disconnected",
+    /// mode: "long_poll"|"webhook", bind_addr?: "127.0.0.1:8647",
+    /// bot_username?: "thclawsbot"}`. Emitted on connect / disconnect.
+    TelegramStatus(String),
     /// Goal-state sidebar refresh (Phase A). Carries the latest snapshot
     /// of the active /goal — `None` means the goal was cleared. Frontend
     /// renders a compact indicator (objective, iterations, tokens
@@ -2361,6 +2389,19 @@ async fn run_worker(
                     state.config.model,
                     prev_model
                 )));
+            }
+            ShellInput::TelegramConnect(_)
+            | ShellInput::TelegramDisconnect
+            | ShellInput::TelegramMessage { .. }
+            | ShellInput::TelegramCallback { .. } => {
+                // Telegram bridge wiring lands in Task F. For now the
+                // worker accepts the variants so the bridge can be
+                // exercised end-to-end at the transport layer; the
+                // GUI/IPC pathway emits warnings until the full
+                // session swap mirrors LineConnect/LineDisconnect.
+                eprintln!(
+                    "[telegram] worker received bridge event — wiring pending (Task F)"
+                );
             }
         }
     }
