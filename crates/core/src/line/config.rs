@@ -35,8 +35,12 @@ pub enum LineConfigError {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LineConfig {
-    /// HS256 JWT issued by the relay's `POST /pair`.
+    /// HS256 JWT issued by the relay's `POST /pair`. Empty in self_hosted mode.
     pub binding_token: String,
+    /// Which bridge runtime to use. Defaults to `Hosted` so existing
+    /// on-disk configs parse unchanged.
+    #[serde(default)]
+    pub mode: crate::line::mode::LineMode,
     /// Override URL for the relay. Falls back to
     /// `$THCLAWS_LINE_SERVER` or `DEFAULT_SERVER_URL`.
     #[serde(default)]
@@ -193,6 +197,26 @@ impl LineConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_line_json_without_mode_parses_as_hosted() {
+        // Existing installs have line.json that predates the field.
+        let legacy = r#"{"binding_token":"abc"}"#;
+        let cfg: LineConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.mode, crate::line::mode::LineMode::Hosted);
+    }
+
+    #[test]
+    fn self_hosted_round_trips() {
+        let cfg = LineConfig {
+            binding_token: String::new(),
+            mode: crate::line::mode::LineMode::SelfHosted,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: LineConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, crate::line::mode::LineMode::SelfHosted);
+    }
 
     #[test]
     fn server_url_precedence_config_over_env_over_default() {
