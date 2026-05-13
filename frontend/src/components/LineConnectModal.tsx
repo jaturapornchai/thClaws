@@ -1,27 +1,25 @@
 import { useEffect, useState } from "react";
-import { X, MessageCircle, CheckCircle2, AlertCircle } from "lucide-react";
+import { X, MessageCircle, CheckCircle2, AlertCircle, Info } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 
-/// Pair-then-status modal for the LINE bridge (plan-07 Phase 1.3).
+/// Pair-then-status modal for the LINE bridge.
 ///
-/// Two states:
-/// - **Disconnected** — pairing-code input + Connect button.
-///   Submits to `line_pair`, which round-trips POST /pair on the
-///   relay and (on success) saves the binding token and signals
-///   the worker to spawn the WS session.
-/// - **Connected** — server URL + Disconnect button. Disconnect
-///   sends `line_disconnect`, which cancels the worker's WS task
-///   and deletes the on-disk config.
-///
-/// `chat_line_status` envelopes flow in via subscribe() so the
-/// modal stays in sync with the worker even when the user paired
-/// from a different surface (e.g. CLI flag in a future Phase).
+/// Two modes:
+/// - **Hosted** — pair via the thClaws relay using an 8-char code.
+///   Original Phase-1.3 flow; unchanged.
+/// - **Self-hosted** — user runs their own LINE OA. Provides channel
+///   credentials + allowlist; thClaws listens on a local port and
+///   the user fronts it with their own subdomain + reverse proxy.
+///   Reply API only — no Push.
 
 type Status = {
   state: "connected" | "disconnected";
+  mode?: "hosted" | "self_hosted";
   server_url: string;
   pending_approvals: number;
 };
+
+type Mode = "hosted" | "self_hosted";
 
 export function LineConnectModal({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<Status>({
@@ -29,39 +27,57 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
     server_url: "",
     pending_approvals: 0,
   });
+  const [mode, setMode] = useState<Mode>("hosted");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Self-hosted form state
+  const [accessToken, setAccessToken] = useState("");
+  const [channelSecret, setChannelSecret] = useState("");
+  const [bindHost, setBindHost] = useState("0.0.0.0");
+  const [bindPort, setBindPort] = useState("8646");
+  const [publicUrl, setPublicUrl] = useState("");
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [allowedGroups, setAllowedGroups] = useState("");
+  const [allowedRooms, setAllowedRooms] = useState("");
+  const [threshold, setThreshold] = useState("45");
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
       if (msg.type === "line_status") {
         setStatus({
           state: (msg.state as Status["state"]) ?? "disconnected",
+          mode: msg.mode as Status["mode"],
           server_url: (msg.server_url as string) ?? "",
           pending_approvals: (msg.pending_approvals as number) ?? 0,
         });
       } else if (msg.type === "line_pair_result") {
         setBusy(false);
         if (msg.ok) {
-          // status will update via the worker's broadcast — clear
-          // the input and error.
           setCode("");
           setError(null);
         } else {
           setError((msg.error as string) ?? "pairing failed");
         }
+      } else if (msg.type === "line_self_hosted_setup_result") {
+        setBusy(false);
+        if (msg.ok) {
+          setError(null);
+          // Clear secret inputs so they don't linger in DOM.
+          setAccessToken("");
+          setChannelSecret("");
+        } else {
+          setError((msg.error as string) ?? "self-hosted setup failed");
+        }
       } else if (msg.type === "line_disconnect_ack") {
         setBusy(false);
       }
     });
-    // Ask for the current status on mount so the modal opens with
-    // the right view (Disconnected vs Connected).
     send({ type: "line_status" });
     return unsub;
   }, []);
 
-  // ESC closes.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -70,7 +86,7 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  const handleConnect = () => {
+  const handleHostedConnect = () => {
     const trimmed = code.trim().toUpperCase();
     if (trimmed.length === 0) return;
     setError(null);
@@ -78,10 +94,36 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
     send({ type: "line_pair", code: trimmed });
   };
 
+  const handleSelfHostedSubmit = () => {
+    const port = parseInt(bindPort, 10);
+    if (!accessToken.trim() || !channelSecret.trim() || !Number.isFinite(port)) {
+      setError("Access token, channel secret, and port are required.");
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    send({
+      type: "line_self_hosted_setup",
+      access_token: accessToken.trim(),
+      channel_secret: channelSecret.trim(),
+      host: bindHost.trim() || "0.0.0.0",
+      port,
+      public_url: publicUrl.trim() || null,
+      allowed_users: allowedUsers.trim(),
+      allowed_groups: allowedGroups.trim(),
+      allowed_rooms: allowedRooms.trim(),
+      slow_response_threshold_secs: parseInt(threshold, 10) || 45,
+    });
+  };
+
   const handleDisconnect = () => {
     setBusy(true);
     send({ type: "line_disconnect" });
   };
+
+  const webhookHint = publicUrl.trim()
+    ? `${publicUrl.replace(/\/+$/, "")}/line/webhook`
+    : `http://${bindHost || "0.0.0.0"}:${bindPort || "8646"}/line/webhook`;
 
   return (
     <div
@@ -94,8 +136,10 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
         style={{
           background: "var(--bg-primary)",
           border: "1px solid var(--border)",
-          width: "440px",
-          maxWidth: "90vw",
+          width: "520px",
+          maxWidth: "95vw",
+          maxHeight: "90vh",
+          overflowY: "auto",
         }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -130,13 +174,43 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
               onDisconnect={handleDisconnect}
             />
           ) : (
-            <DisconnectedView
-              code={code}
-              setCode={setCode}
-              busy={busy}
-              error={error}
-              onConnect={handleConnect}
-            />
+            <>
+              <ModeToggle mode={mode} setMode={setMode} />
+              {mode === "hosted" ? (
+                <HostedForm
+                  code={code}
+                  setCode={setCode}
+                  busy={busy}
+                  error={error}
+                  onConnect={handleHostedConnect}
+                />
+              ) : (
+                <SelfHostedForm
+                  accessToken={accessToken}
+                  setAccessToken={setAccessToken}
+                  channelSecret={channelSecret}
+                  setChannelSecret={setChannelSecret}
+                  bindHost={bindHost}
+                  setBindHost={setBindHost}
+                  bindPort={bindPort}
+                  setBindPort={setBindPort}
+                  publicUrl={publicUrl}
+                  setPublicUrl={setPublicUrl}
+                  allowedUsers={allowedUsers}
+                  setAllowedUsers={setAllowedUsers}
+                  allowedGroups={allowedGroups}
+                  setAllowedGroups={setAllowedGroups}
+                  allowedRooms={allowedRooms}
+                  setAllowedRooms={setAllowedRooms}
+                  threshold={threshold}
+                  setThreshold={setThreshold}
+                  webhookHint={webhookHint}
+                  busy={busy}
+                  error={error}
+                  onSubmit={handleSelfHostedSubmit}
+                />
+              )}
+            </>
           )}
         </div>
       </div>
@@ -144,7 +218,37 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function DisconnectedView({
+function ModeToggle({ mode, setMode }: { mode: Mode; setMode: (m: Mode) => void }) {
+  return (
+    <div
+      className="flex gap-2 p-1 rounded"
+      style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+    >
+      <button
+        onClick={() => setMode("hosted")}
+        className="flex-1 px-3 py-1.5 rounded text-xs font-semibold"
+        style={{
+          background: mode === "hosted" ? "var(--accent)" : "transparent",
+          color: mode === "hosted" ? "var(--accent-fg, #ffffff)" : "var(--text-secondary)",
+        }}
+      >
+        Hosted (thClaws relay)
+      </button>
+      <button
+        onClick={() => setMode("self_hosted")}
+        className="flex-1 px-3 py-1.5 rounded text-xs font-semibold"
+        style={{
+          background: mode === "self_hosted" ? "var(--accent)" : "transparent",
+          color: mode === "self_hosted" ? "var(--accent-fg, #ffffff)" : "var(--text-secondary)",
+        }}
+      >
+        Self-hosted (your LINE OA)
+      </button>
+    </div>
+  );
+}
+
+function HostedForm({
   code,
   setCode,
   busy,
@@ -161,14 +265,10 @@ function DisconnectedView({
     <>
       <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
         Send any message to your thClaws LINE OA, then paste the 8-character
-        pairing code below. The bridge runs in the background once paired —
-        agent stays on this machine; LINE is just the chat surface.
+        pairing code below.
       </p>
       <div className="space-y-2">
-        <label
-          className="block text-xs font-semibold"
-          style={{ color: "var(--text-primary)" }}
-        >
+        <label className="block text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
           Pairing code
         </label>
         <input
@@ -189,29 +289,14 @@ function DisconnectedView({
           autoFocus
         />
       </div>
-      {error && (
-        <div
-          className="flex items-start gap-2 text-xs px-3 py-2 rounded"
-          style={{
-            background: "var(--bg-secondary)",
-            color: "var(--danger, #e06c75)",
-            border: "1px solid var(--border)",
-          }}
-        >
-          <AlertCircle size={14} className="shrink-0 mt-0.5" />
-          <span>{error}</span>
-        </div>
-      )}
-      <div className="flex justify-end gap-2">
+      <ErrorBanner error={error} />
+      <div className="flex justify-end">
         <button
           onClick={onConnect}
           disabled={busy || code.trim().length === 0}
           className="px-3 py-1.5 rounded text-xs font-semibold"
           style={{
-            background:
-              busy || code.trim().length === 0
-                ? "var(--bg-secondary)"
-                : "var(--accent)",
+            background: busy || code.trim().length === 0 ? "var(--bg-secondary)" : "var(--accent)",
             color: "var(--accent-fg, #ffffff)",
             opacity: busy || code.trim().length === 0 ? 0.5 : 1,
           }}
@@ -220,6 +305,229 @@ function DisconnectedView({
         </button>
       </div>
     </>
+  );
+}
+
+function SelfHostedForm({
+  accessToken,
+  setAccessToken,
+  channelSecret,
+  setChannelSecret,
+  bindHost,
+  setBindHost,
+  bindPort,
+  setBindPort,
+  publicUrl,
+  setPublicUrl,
+  allowedUsers,
+  setAllowedUsers,
+  allowedGroups,
+  setAllowedGroups,
+  allowedRooms,
+  setAllowedRooms,
+  threshold,
+  setThreshold,
+  webhookHint,
+  busy,
+  error,
+  onSubmit,
+}: {
+  accessToken: string;
+  setAccessToken: (s: string) => void;
+  channelSecret: string;
+  setChannelSecret: (s: string) => void;
+  bindHost: string;
+  setBindHost: (s: string) => void;
+  bindPort: string;
+  setBindPort: (s: string) => void;
+  publicUrl: string;
+  setPublicUrl: (s: string) => void;
+  allowedUsers: string;
+  setAllowedUsers: (s: string) => void;
+  allowedGroups: string;
+  setAllowedGroups: (s: string) => void;
+  allowedRooms: string;
+  setAllowedRooms: (s: string) => void;
+  threshold: string;
+  setThreshold: (s: string) => void;
+  webhookHint: string;
+  busy: boolean;
+  error: string | null;
+  onSubmit: () => void;
+}) {
+  return (
+    <>
+      <div
+        className="flex items-start gap-2 text-xs px-3 py-2 rounded"
+        style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+      >
+        <Info size={14} className="shrink-0 mt-0.5" style={{ color: "var(--accent)" }} />
+        <span style={{ color: "var(--text-secondary)" }}>
+          <strong style={{ color: "var(--text-primary)" }}>Reply API only — no Push.</strong>{" "}
+          thClaws binds the port locally; you front it with your own subdomain + reverse
+          proxy. Paste{" "}
+          <code style={{ color: "var(--text-primary)" }}>{webhookHint}</code>{" "}
+          into the LINE Developers Console webhook field once your tunnel is up.
+        </span>
+      </div>
+
+      <Field label="Channel access token" required>
+        <input
+          type="password"
+          value={accessToken}
+          onChange={(e) => setAccessToken(e.target.value)}
+          placeholder="long-lived token"
+          className="w-full px-3 py-2 rounded font-mono text-xs"
+          style={inputStyle}
+          autoComplete="off"
+        />
+      </Field>
+      <Field label="Channel secret" required>
+        <input
+          type="password"
+          value={channelSecret}
+          onChange={(e) => setChannelSecret(e.target.value)}
+          placeholder="HMAC verification secret"
+          className="w-full px-3 py-2 rounded font-mono text-xs"
+          style={inputStyle}
+          autoComplete="off"
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Listen host">
+          <input
+            type="text"
+            value={bindHost}
+            onChange={(e) => setBindHost(e.target.value)}
+            placeholder="0.0.0.0"
+            className="w-full px-3 py-2 rounded font-mono text-xs"
+            style={inputStyle}
+          />
+        </Field>
+        <Field label="Listen port">
+          <input
+            type="number"
+            value={bindPort}
+            onChange={(e) => setBindPort(e.target.value)}
+            placeholder="8646"
+            className="w-full px-3 py-2 rounded font-mono text-xs"
+            style={inputStyle}
+          />
+        </Field>
+      </div>
+      <Field label="Public URL (optional — display hint only)">
+        <input
+          type="text"
+          value={publicUrl}
+          onChange={(e) => setPublicUrl(e.target.value)}
+          placeholder="https://line.your-domain.com"
+          className="w-full px-3 py-2 rounded font-mono text-xs"
+          style={inputStyle}
+        />
+      </Field>
+      <Field label="Allowed user IDs (comma-separated)">
+        <input
+          type="text"
+          value={allowedUsers}
+          onChange={(e) => setAllowedUsers(e.target.value)}
+          placeholder="U1234,U5678"
+          className="w-full px-3 py-2 rounded font-mono text-xs"
+          style={inputStyle}
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Allowed groups">
+          <input
+            type="text"
+            value={allowedGroups}
+            onChange={(e) => setAllowedGroups(e.target.value)}
+            placeholder="G1234"
+            className="w-full px-3 py-2 rounded font-mono text-xs"
+            style={inputStyle}
+          />
+        </Field>
+        <Field label="Allowed rooms">
+          <input
+            type="text"
+            value={allowedRooms}
+            onChange={(e) => setAllowedRooms(e.target.value)}
+            placeholder="R1234"
+            className="w-full px-3 py-2 rounded font-mono text-xs"
+            style={inputStyle}
+          />
+        </Field>
+      </div>
+      <Field label="Slow-response threshold (sec)">
+        <input
+          type="number"
+          value={threshold}
+          onChange={(e) => setThreshold(e.target.value)}
+          placeholder="45"
+          className="w-full px-3 py-2 rounded font-mono text-xs"
+          style={inputStyle}
+        />
+      </Field>
+
+      <ErrorBanner error={error} />
+
+      <div className="flex justify-end">
+        <button
+          onClick={onSubmit}
+          disabled={busy}
+          className="px-3 py-1.5 rounded text-xs font-semibold"
+          style={{
+            background: busy ? "var(--bg-secondary)" : "var(--accent)",
+            color: "var(--accent-fg, #ffffff)",
+            opacity: busy ? 0.5 : 1,
+          }}
+        >
+          {busy ? "Setting up…" : "Save & Connect"}
+        </button>
+      </div>
+    </>
+  );
+}
+
+function Field({
+  label,
+  required,
+  children,
+}: {
+  label: string;
+  required?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <label className="block text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
+        {label}
+        {required && <span style={{ color: "var(--danger, #e06c75)" }}> *</span>}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+const inputStyle = {
+  background: "var(--bg-secondary)",
+  border: "1px solid var(--border)",
+  color: "var(--text-primary)",
+};
+
+function ErrorBanner({ error }: { error: string | null }) {
+  if (!error) return null;
+  return (
+    <div
+      className="flex items-start gap-2 text-xs px-3 py-2 rounded"
+      style={{
+        background: "var(--bg-secondary)",
+        color: "var(--danger, #e06c75)",
+        border: "1px solid var(--border)",
+      }}
+    >
+      <AlertCircle size={14} className="shrink-0 mt-0.5" />
+      <span>{error}</span>
+    </div>
   );
 }
 
@@ -232,14 +540,12 @@ function ConnectedView({
   busy: boolean;
   onDisconnect: () => void;
 }) {
+  const modeLabel = status.mode === "self_hosted" ? "self-hosted" : "hosted";
   return (
     <>
       <div
         className="flex items-start gap-2 text-xs px-3 py-2 rounded"
-        style={{
-          background: "var(--bg-secondary)",
-          border: "1px solid var(--border)",
-        }}
+        style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
       >
         <CheckCircle2
           size={14}
@@ -248,8 +554,7 @@ function ConnectedView({
         />
         <div className="space-y-1">
           <div style={{ color: "var(--text-primary)" }}>
-            <strong>Connected.</strong> Send a message to your LINE OA to
-            verify end-to-end.
+            <strong>Connected ({modeLabel}).</strong> Send a message to your LINE OA to verify.
           </div>
           {status.server_url && (
             <div

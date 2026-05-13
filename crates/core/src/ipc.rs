@@ -756,6 +756,102 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        "line_self_hosted_setup" => {
+            let pick_str = |k: &str| {
+                msg.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            let pick_u64 = |k: &str, default: u64| {
+                msg.get(k).and_then(|v| v.as_u64()).unwrap_or(default)
+            };
+
+            let access_token = pick_str("access_token");
+            let channel_secret = pick_str("channel_secret");
+            if access_token.trim().is_empty() || channel_secret.trim().is_empty() {
+                let payload = serde_json::json!({
+                    "type": "line_self_hosted_setup_result",
+                    "ok": false,
+                    "error": "access_token and channel_secret are required",
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+
+            // Stash secrets in the OS keychain so they never land in
+            // ~/.config/thclaws/line.json. spawn() loads them from
+            // env → keychain on every connect.
+            if let Err(e) = crate::secrets::keychain_set_raw(
+                crate::line::direct::spawn::KEYCHAIN_ACCESS_TOKEN,
+                &access_token,
+            ) {
+                let payload = serde_json::json!({
+                    "type": "line_self_hosted_setup_result",
+                    "ok": false,
+                    "error": format!("keychain access_token: {e}"),
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+            if let Err(e) = crate::secrets::keychain_set_raw(
+                crate::line::direct::spawn::KEYCHAIN_SECRET,
+                &channel_secret,
+            ) {
+                let payload = serde_json::json!({
+                    "type": "line_self_hosted_setup_result",
+                    "ok": false,
+                    "error": format!("keychain channel_secret: {e}"),
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+
+            let direct = crate::line::direct::config::DirectConfig {
+                host: {
+                    let h = pick_str("host");
+                    if h.is_empty() { "0.0.0.0".to_string() } else { h }
+                },
+                port: pick_u64("port", 8646) as u16,
+                public_url: {
+                    let u = pick_str("public_url");
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                slow_response_threshold_secs: pick_u64("slow_response_threshold_secs", 45),
+                allowed_users_csv: pick_str("allowed_users"),
+                allowed_groups_csv: pick_str("allowed_groups"),
+                allowed_rooms_csv: pick_str("allowed_rooms"),
+            };
+            let cfg = crate::line::LineConfig {
+                binding_token: String::new(),
+                mode: crate::line::LineMode::SelfHosted,
+                server_url: None,
+                display_name: None,
+                picture_url: None,
+                language: None,
+                direct: Some(direct),
+            };
+            if let Err(e) = cfg.save() {
+                let payload = serde_json::json!({
+                    "type": "line_self_hosted_setup_result",
+                    "ok": false,
+                    "error": format!("save config: {e}"),
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::LineConnect(cfg));
+            let payload = serde_json::json!({
+                "type": "line_self_hosted_setup_result",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Working directory (M6.36 SERVE9d — migrated from gui.rs) ─
         "get_cwd" => {
             let cwd = std::env::current_dir()

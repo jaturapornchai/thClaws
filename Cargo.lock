@@ -4281,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "thclaws-core"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "arboard",
  "async-stream",
@@ -4324,6 +4324,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
+ "tower",
  "umya-spreadsheet",
  "url",
  "urlencoding",

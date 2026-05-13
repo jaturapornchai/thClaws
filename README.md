@@ -92,6 +92,8 @@ The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 
 - **Shell escape.** Prefix any REPL line with `!` to run a shell command directly — no tokens, no approval prompt, no agent round-trip (`! git status`, `! ls`, etc.).
 
+- **LINE OA bridge — hosted or self-hosted.** Pair via the thClaws relay for a 1-minute setup, or run against your own LINE Official Account with full data sovereignty (Reply API only — no Push). See [docs/line-self-hosted.md](docs/line-self-hosted.md) for the self-hosted setup, including channel-secret HMAC verification, allowlist, and slow-response postback UX.
+
 ---
 
 ## Installation

@@ -1867,9 +1867,14 @@ async fn run_worker(
                 // before the connect.
                 state.agent.permission_mode = crate::permissions::PermissionMode::LineGated;
 
+                let mode_str = match handle.mode {
+                    crate::line::LineMode::Hosted => "hosted",
+                    crate::line::LineMode::SelfHosted => "self_hosted",
+                };
                 let payload = serde_json::json!({
                     "type": "line_status",
                     "state": handle.status.state,
+                    "mode": mode_str,
                     "server_url": handle.status.server_url,
                     "pending_approvals": handle.status.pending_approvals,
                     "display_name": pair_display_name,
