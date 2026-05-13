@@ -12,4 +12,5 @@ pub mod reply_store;
 pub mod server;
 pub mod signature;
 pub mod slow_response;
+pub mod spawn;
 pub mod types;
