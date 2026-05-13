@@ -717,10 +717,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 let language = pick_str("language");
                 let cfg = crate::line::LineConfig {
                     binding_token: token,
+                    mode: crate::line::LineMode::Hosted,
                     server_url: Some(server_url.clone()),
                     display_name: display_name.clone(),
                     picture_url: picture_url.clone(),
                     language,
+                    direct: None,
                 };
                 if let Err(e) = cfg.save() {
                     let payload = serde_json::json!({

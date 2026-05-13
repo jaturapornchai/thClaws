@@ -11,6 +11,11 @@ pub mod errors;
 pub mod reply_store;
 pub mod server;
 pub mod signature;
+// `sink` bridges into `shared_session` which is gui-gated, so this
+// module is gui-gated too. CLI builds compile direct webhook + client
+// but not the worker forwarder.
+#[cfg(feature = "gui")]
+pub mod sink;
 pub mod slow_response;
 pub mod spawn;
 pub mod types;
