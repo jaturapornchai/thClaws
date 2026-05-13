@@ -12,6 +12,7 @@
 //! latency (requires public HTTPS + setWebhook with secret_token).
 
 pub mod allowlist;
+pub mod approver;
 pub mod chunk;
 pub mod client;
 pub mod config;
@@ -19,10 +20,9 @@ pub mod dispatch;
 pub mod errors;
 pub mod long_poll;
 pub mod mode;
+pub mod spawn;
 pub mod types;
 pub mod webhook;
-
-pub mod spawn;
 
 // `sink` bridges into `shared_session::ShellInput` which is gui-gated
 // (CLI builds have no worker channel). The webhook + long-poll
