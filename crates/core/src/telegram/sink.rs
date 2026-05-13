@@ -19,6 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::oneshot;
 
+use super::approver::TelegramApprover;
 use super::client::TelegramClient;
 use super::long_poll::TelegramUpdateSink;
 use super::types::{Message, MessageEntity, Update};
@@ -31,6 +32,10 @@ pub struct TelegramSink {
     /// groups. `None` → mention check is skipped (forward all).
     pub bot_username: Option<String>,
     pub require_mention_in_groups: bool,
+    /// When the bridge is connected, the approver shares the chat_id
+    /// state so inline-keyboard approvals can land in the active
+    /// conversation. `None` for transport-only tests.
+    pub approver: Option<Arc<TelegramApprover>>,
 }
 
 #[async_trait]
@@ -51,6 +56,9 @@ impl TelegramSink {
         let Some(text) = msg.text.clone() else {
             return;
         };
+        if let Some(approver) = &self.approver {
+            approver.note_chat_id(msg.chat.id);
+        }
         if msg.chat.is_group() && self.require_mention_in_groups {
             if !is_mentioned(&text, &msg.entities, self.bot_username.as_deref())
                 && !replied_to_bot(&msg, self.bot_username.as_deref())

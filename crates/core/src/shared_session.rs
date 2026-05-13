@@ -607,6 +607,18 @@ pub struct WorkerState {
     /// session is active.
     pub line_pre_mode: Option<crate::permissions::PermissionMode>,
     pub line_pre_approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
+    /// Active Telegram bridge transport (long-poll loop or webhook
+    /// axum server). `Some` only while the bridge is running;
+    /// `TelegramDisconnect` cancels + clears it.
+    pub telegram_session: Option<crate::telegram::spawn::TelegramHandle>,
+    /// Live `TelegramApprover` while the bridge is connected. Cloned
+    /// into `state.approver` during connect; the sink calls
+    /// `note_chat_id` on it as user messages arrive.
+    pub telegram_approver: Option<std::sync::Arc<crate::telegram::approver::TelegramApprover>>,
+    /// Pre-Telegram-connect snapshot of permission mode + approver,
+    /// mirror of `line_pre_*`.
+    pub telegram_pre_mode: Option<crate::permissions::PermissionMode>,
+    pub telegram_pre_approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
 }
 
 /// M6.29: handle to a running `/loop` task.
@@ -1538,6 +1550,10 @@ async fn run_worker(
         line_session: None,
         line_pre_mode: None,
         line_pre_approver: None,
+        telegram_session: None,
+        telegram_approver: None,
+        telegram_pre_mode: None,
+        telegram_pre_approver: None,
     };
 
     // M6.35 HOOK2: fire session_start hook now that WorkerState is
@@ -2390,18 +2406,176 @@ async fn run_worker(
                     prev_model
                 )));
             }
-            ShellInput::TelegramConnect(_)
-            | ShellInput::TelegramDisconnect
-            | ShellInput::TelegramMessage { .. }
-            | ShellInput::TelegramCallback { .. } => {
-                // Telegram bridge wiring lands in Task F. For now the
-                // worker accepts the variants so the bridge can be
-                // exercised end-to-end at the transport layer; the
-                // GUI/IPC pathway emits warnings until the full
-                // session swap mirrors LineConnect/LineDisconnect.
-                eprintln!(
-                    "[telegram] worker received bridge event — wiring pending (Task F)"
+            ShellInput::TelegramConnect(tg_cfg) => {
+                if let Some(prev) = state.telegram_session.take() {
+                    prev.cancel.cancel();
+                }
+                // Build the approver first so the sink can share its
+                // chat-id state. The approver needs the client, which
+                // is constructed inside `spawn` — to avoid building
+                // the client twice we use a placeholder Arc and
+                // populate it after spawn returns. Cleaner pattern:
+                // spawn returns the client; we wrap an approver around
+                // it and swap into the sink via OnceLock-like pattern.
+                //
+                // Concretely: we build a real client here from the
+                // config's bot token, hand it to BOTH the approver
+                // and the spawn (spawn re-derives its own client
+                // from the token, but `note_chat_id` only mutates
+                // the approver's Arc<Mutex<Option<i64>>>, so the
+                // approver client and spawn client can diverge
+                // safely — they share no mutable state).
+                let approver_for_sink: std::sync::Arc<crate::telegram::approver::TelegramApprover>;
+                let client_for_sink: std::sync::Arc<crate::telegram::client::TelegramClient>;
+                match crate::telegram::spawn::load_bot_token_pub() {
+                    Ok(tok) => match crate::telegram::client::TelegramClient::new(tok) {
+                        Ok(c) => {
+                            let c_arc = std::sync::Arc::new(c);
+                            approver_for_sink = std::sync::Arc::new(
+                                crate::telegram::approver::TelegramApprover::new(c_arc.clone()),
+                            );
+                            client_for_sink = c_arc;
+                        }
+                        Err(e) => {
+                            let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                                "[telegram] connect failed: {e}"
+                            )));
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                            "[telegram] connect failed: {e}"
+                        )));
+                        continue;
+                    }
+                }
+                let sink: std::sync::Arc<dyn crate::telegram::long_poll::TelegramUpdateSink> =
+                    std::sync::Arc::new(crate::telegram::sink::TelegramSink {
+                        input_tx: input_tx_self.clone(),
+                        client: client_for_sink.clone(),
+                        bot_username: None, // populated after spawn returns
+                        require_mention_in_groups: tg_cfg.require_mention_in_groups,
+                        approver: Some(approver_for_sink.clone()),
+                    });
+                let handle = match crate::telegram::spawn::spawn(tg_cfg, sink).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let payload = serde_json::json!({
+                            "type": "telegram_status",
+                            "state": "disconnected",
+                            "error": e.to_string(),
+                        });
+                        let _ =
+                            events_tx.send(ViewEvent::TelegramStatus(payload.to_string()));
+                        let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                            "[telegram] connect failed: {e}"
+                        )));
+                        continue;
+                    }
+                };
+
+                if state.telegram_pre_mode.is_none() {
+                    state.telegram_pre_mode = Some(state.agent.permission_mode);
+                    state.telegram_pre_approver = Some(state.approver.clone());
+                }
+                crate::permissions::set_current_mode_and_broadcast(
+                    crate::permissions::PermissionMode::LineGated,
                 );
+                state.approver = approver_for_sink.clone()
+                    as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
+                if let Err(e) = state.rebuild_agent(true) {
+                    eprintln!("[telegram] rebuild_agent after mode swap failed: {e}");
+                }
+                state.agent.permission_mode =
+                    crate::permissions::PermissionMode::LineGated;
+
+                let mode_str = match handle.mode {
+                    crate::telegram::TelegramMode::LongPoll => "long_poll",
+                    crate::telegram::TelegramMode::Webhook => "webhook",
+                };
+                let bind_addr = handle.bind_addr.map(|a| a.to_string()).unwrap_or_default();
+                let bot_username = handle.bot_username.clone().unwrap_or_default();
+                let payload = serde_json::json!({
+                    "type": "telegram_status",
+                    "state": "connected",
+                    "mode": mode_str,
+                    "bind_addr": bind_addr,
+                    "bot_username": bot_username,
+                });
+                state.telegram_approver = Some(approver_for_sink);
+                state.telegram_session = Some(handle);
+                let _ = events_tx.send(ViewEvent::TelegramStatus(payload.to_string()));
+                let _ = events_tx.send(ViewEvent::SlashOutput(
+                    "[telegram] bridge connected · permissions routed to Telegram".into(),
+                ));
+            }
+            ShellInput::TelegramDisconnect => {
+                if let Some(handle) = state.telegram_session.take() {
+                    handle.cancel.cancel();
+                }
+                state.telegram_approver = None;
+                if let Some(prev_mode) = state.telegram_pre_mode.take() {
+                    crate::permissions::set_current_mode_and_broadcast(prev_mode);
+                    state.agent.permission_mode = prev_mode;
+                }
+                if let Some(prev_approver) = state.telegram_pre_approver.take() {
+                    state.approver = prev_approver;
+                    if let Err(e) = state.rebuild_agent(true) {
+                        eprintln!("[telegram] rebuild_agent after restore failed: {e}");
+                    }
+                }
+                let payload = serde_json::json!({
+                    "type": "telegram_status",
+                    "state": "disconnected",
+                });
+                let _ = events_tx.send(ViewEvent::TelegramStatus(payload.to_string()));
+                let _ = events_tx.send(ViewEvent::SlashOutput(
+                    "[telegram] bridge disconnected".into(),
+                ));
+            }
+            ShellInput::TelegramMessage {
+                chat_id: _chat_id,
+                reply_to_message_id: _reply_to,
+                text,
+                respond,
+            } => {
+                // Drive a turn just like LineMessage, then fulfil the
+                // oneshot with the captured final text. The sink owns
+                // the actual `sendMessage` call (it knows chat_id +
+                // reply target). We just produce the text.
+                let mut event_rx = events_tx.subscribe();
+                let collector = tokio::spawn(async move {
+                    let mut buf = String::new();
+                    while let Ok(ev) = event_rx.recv().await {
+                        match ev {
+                            ViewEvent::AssistantTextDelta(s) => buf.push_str(&s),
+                            ViewEvent::ToolCallStart { .. } => buf.clear(),
+                            ViewEvent::TurnDone => break,
+                            ViewEvent::ErrorText(s) => {
+                                if buf.is_empty() {
+                                    buf.push_str(&s);
+                                } else {
+                                    buf.push_str("\n\n");
+                                    buf.push_str(&s);
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    buf
+                });
+                crate::tools::ask::set_line_driven_turn(true);
+                handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+                crate::tools::ask::set_line_driven_turn(false);
+                let final_text = collector.await.unwrap_or_default();
+                let _ = respond.send(final_text);
+            }
+            ShellInput::TelegramCallback { data } => {
+                if let Some(ap) = state.telegram_approver.as_ref() {
+                    let _ = ap.record_decision_from_postback(&data);
+                }
             }
         }
     }

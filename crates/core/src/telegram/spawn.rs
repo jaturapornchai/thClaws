@@ -41,6 +41,13 @@ pub struct TelegramHandle {
     pub bot_username: Option<String>,
 }
 
+/// Public wrapper so `shared_session` can resolve the token before
+/// `spawn` runs (to build a separate `TelegramClient` that the
+/// approver and sink share).
+pub fn load_bot_token_pub() -> Result<String, TelegramError> {
+    load_bot_token()
+}
+
 fn load_bot_token() -> Result<String, TelegramError> {
     if let Ok(v) = std::env::var("TELEGRAM_BOT_TOKEN") {
         if !v.is_empty() {

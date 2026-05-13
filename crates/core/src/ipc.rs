@@ -852,6 +852,114 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        "telegram_setup" => {
+            let pick_str = |k: &str| {
+                msg.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            let pick_u64 = |k: &str, default: u64| {
+                msg.get(k).and_then(|v| v.as_u64()).unwrap_or(default)
+            };
+            let pick_bool = |k: &str, default: bool| {
+                msg.get(k).and_then(|v| v.as_bool()).unwrap_or(default)
+            };
+
+            let bot_token = pick_str("bot_token");
+            if bot_token.trim().is_empty() {
+                let payload = serde_json::json!({
+                    "type": "telegram_setup_result",
+                    "ok": false,
+                    "error": "bot_token is required",
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+            let mode_str = pick_str("mode");
+            let mode = if mode_str.eq_ignore_ascii_case("webhook") {
+                crate::telegram::TelegramMode::Webhook
+            } else {
+                crate::telegram::TelegramMode::LongPoll
+            };
+            let webhook_secret = pick_str("webhook_secret_token");
+            if mode == crate::telegram::TelegramMode::Webhook && webhook_secret.trim().is_empty() {
+                let payload = serde_json::json!({
+                    "type": "telegram_setup_result",
+                    "ok": false,
+                    "error": "webhook_secret_token is required for webhook mode",
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+
+            if let Err(e) = crate::secrets::keychain_set_raw(
+                crate::telegram::spawn::KEYCHAIN_BOT_TOKEN,
+                &bot_token,
+            ) {
+                let payload = serde_json::json!({
+                    "type": "telegram_setup_result",
+                    "ok": false,
+                    "error": format!("keychain bot_token: {e}"),
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+            if mode == crate::telegram::TelegramMode::Webhook {
+                if let Err(e) = crate::secrets::keychain_set_raw(
+                    crate::telegram::spawn::KEYCHAIN_WEBHOOK_SECRET,
+                    &webhook_secret,
+                ) {
+                    let payload = serde_json::json!({
+                        "type": "telegram_setup_result",
+                        "ok": false,
+                        "error": format!("keychain webhook_secret: {e}"),
+                    });
+                    (ctx.dispatch)(payload.to_string());
+                    return true;
+                }
+            }
+
+            let cfg = crate::telegram::TelegramConfig {
+                mode,
+                long_poll_timeout_secs: pick_u64("long_poll_timeout_secs", 30),
+                webhook_host: {
+                    let h = pick_str("webhook_host");
+                    if h.is_empty() { "0.0.0.0".into() } else { h }
+                },
+                webhook_port: pick_u64("webhook_port", 8647) as u16,
+                webhook_public_url: {
+                    let u = pick_str("webhook_public_url");
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                allowed_users_csv: pick_str("allowed_users"),
+                allowed_chats_csv: pick_str("allowed_chats"),
+                require_mention_in_groups: pick_bool("require_mention_in_groups", true),
+            };
+
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::TelegramConnect(cfg));
+            let payload = serde_json::json!({
+                "type": "telegram_setup_result",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "telegram_disconnect" => {
+            let _ = ctx
+                .shared
+                .input_tx
+                .send(crate::shared_session::ShellInput::TelegramDisconnect);
+            let payload = serde_json::json!({
+                "type": "telegram_disconnect_result",
+                "ok": true,
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
         // ── Working directory (M6.36 SERVE9d — migrated from gui.rs) ─
         "get_cwd" => {
             let cwd = std::env::current_dir()
