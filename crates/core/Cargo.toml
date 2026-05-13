@@ -43,6 +43,7 @@ rustyline = "14"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 sha2 = "0.10"
+hmac = "0.12"
 getrandom = "0.2"
 url = "2"
 urlencoding = "2"
