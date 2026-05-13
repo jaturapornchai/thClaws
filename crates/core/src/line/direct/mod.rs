@@ -4,6 +4,8 @@
 
 pub mod allowlist;
 pub mod chunk;
+pub mod config;
 pub mod dedup;
+pub mod errors;
 pub mod reply_store;
 pub mod signature;

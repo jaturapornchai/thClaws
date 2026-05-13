@@ -55,6 +55,9 @@ pub struct LineConfig {
     pub picture_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Self-hosted bridge settings. `None` in `Hosted` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<crate::line::direct::config::DirectConfig>,
 }
 
 impl LineConfig {
