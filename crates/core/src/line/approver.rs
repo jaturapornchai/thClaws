@@ -32,6 +32,8 @@ use tokio::sync::oneshot;
 use crate::permissions::{ApprovalDecision, ApprovalRequest, ApprovalSink};
 
 use super::client::LineClient;
+use super::direct::client::DirectLineClient;
+use super::direct::reply_store::ReplyTokenStore;
 use super::protocol::QuickReplyButton;
 
 /// Cap on how long we'll wait for the user to respond before
@@ -132,12 +134,17 @@ impl Pending {
 
 #[derive(Clone)]
 pub struct LineApprover {
-    /// LINE client used to POST the approval prompt via
-    /// `POST /reply/{request_id}` (or the push fallback in the
-    /// relay). `None` lets the approver run in test mode where
-    /// `record_decision_*` resolves pending approvals without any
-    /// network traffic.
+    /// Hosted-mode relay client. `None` for self-hosted mode or
+    /// for the test-mode constructor.
     client: Option<Arc<LineClient>>,
+    /// Self-hosted Reply-API-only client. `None` for hosted mode.
+    /// When set, the approver uses a reply-token-only flow: no
+    /// unsolicited prompt; deny-safe when no token is available.
+    direct_client: Option<Arc<DirectLineClient>>,
+    /// Self-hosted reply token store. Same `Arc<>` the webhook
+    /// server populates so the approver can consume tokens fresh
+    /// from inbound user messages.
+    reply_store: Option<Arc<ReplyTokenStore>>,
     pending: Arc<Mutex<Pending>>,
     timeout: Duration,
 }
@@ -146,6 +153,25 @@ impl LineApprover {
     pub fn new(client: Arc<LineClient>) -> Self {
         Self {
             client: Some(client),
+            direct_client: None,
+            reply_store: None,
+            pending: Arc::new(Mutex::new(Pending::default())),
+            timeout: DEFAULT_TIMEOUT,
+        }
+    }
+
+    /// Self-hosted constructor — approver routes prompts via LINE
+    /// Reply API only (no Push). When no fresh reply token is in
+    /// the store at prompt time, `approve()` denies the tool call
+    /// and logs `[line/direct] approval denied: NoValidReplyToken`.
+    pub fn for_self_hosted(
+        direct_client: Arc<DirectLineClient>,
+        reply_store: Arc<ReplyTokenStore>,
+    ) -> Self {
+        Self {
+            client: None,
+            direct_client: Some(direct_client),
+            reply_store: Some(reply_store),
             pending: Arc::new(Mutex::new(Pending::default())),
             timeout: DEFAULT_TIMEOUT,
         }
@@ -157,6 +183,8 @@ impl LineApprover {
     pub fn for_test() -> Self {
         Self {
             client: None,
+            direct_client: None,
+            reply_store: None,
             pending: Arc::new(Mutex::new(Pending::default())),
             timeout: DEFAULT_TIMEOUT,
         }
@@ -285,6 +313,22 @@ impl LineApprover {
 #[async_trait]
 impl ApprovalSink for LineApprover {
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
+        // Self-hosted defer-deny path. ApprovalRequest does not carry
+        // a chat_id, so we cannot pick a reply token to send a prompt
+        // to. Per the self-hosted contract (no Push API ever), we
+        // cannot proactively initiate an unsolicited message — so we
+        // deny the tool call and log it. Operators who want approval
+        // gating in self-hosted mode should run in `PermissionMode::Auto`
+        // for the LINE-bound agent, or stay in hosted mode where the
+        // relay's push channel is available.
+        if self.direct_client.is_some() {
+            eprintln!(
+                "[line/direct] approval denied: self_hosted mode does not route prompts (tool={})",
+                req.tool_name
+            );
+            return ApprovalDecision::Deny;
+        }
+
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         if let Ok(mut pending) = self.pending.lock() {

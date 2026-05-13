@@ -1812,7 +1812,28 @@ async fn run_worker(
                 // can render the display name + avatar.
                 let pair_display_name = line_cfg.display_name.clone();
                 let pair_picture_url = line_cfg.picture_url.clone();
-                let handle = crate::line::bootstrap::spawn(line_cfg, input_tx_self.clone());
+                let handle = match crate::line::bootstrap::spawn(
+                    line_cfg, input_tx_self.clone(),
+                )
+                .await
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("[line] spawn failed: {e}");
+                        let payload = serde_json::json!({
+                            "type": "line_status",
+                            "state": "disconnected",
+                            "server_url": "",
+                            "pending_approvals": 0,
+                            "error": e.clone(),
+                        });
+                        let _ = events_tx.send(ViewEvent::LineStatus(payload.to_string()));
+                        let _ = events_tx.send(ViewEvent::SlashOutput(format!(
+                            "[line] connect failed: {e}"
+                        )));
+                        continue;
+                    }
+                };
 
                 // Plan-07 Phase 2.1: swap permission posture to
                 // route approvals through LINE while the bridge
@@ -1933,7 +1954,14 @@ async fn run_worker(
                 // reply. Server-side, the broker drops the message
                 // when no browser is connected — so the fan-out
                 // is harmless overhead for OA-only users.
-                let bridge_client = state.line_session.as_ref().map(|s| s.client.clone());
+                // `bridge_client` fans out per-turn `ViewEvent`s to the
+                // relay's chat-bridge (plan-10 browser chat). Only the
+                // hosted mode has a relay to fan to; self-hosted is `None`
+                // and the fan-out becomes a no-op.
+                let bridge_client = state
+                    .line_session
+                    .as_ref()
+                    .and_then(|s| s.client.clone());
                 let mut event_rx = events_tx.subscribe();
                 let collector = tokio::spawn(async move {
                     // Plan-07 Phase 2.2: capture only the FINAL
