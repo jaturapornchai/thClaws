@@ -39,6 +39,7 @@ pub mod instructions;
 pub mod ipc;
 pub mod kms;
 pub mod line;
+pub mod telegram;
 /// ChatGPT OAuth device-code flow for the `chatgpt-codex` provider.
 pub mod login_codex;
 pub mod marketplace;
