@@ -43,6 +43,15 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
   const [allowedRooms, setAllowedRooms] = useState("");
   const [threshold, setThreshold] = useState("45");
   const [autoApproveAll, setAutoApproveAll] = useState(false);
+  // Masked previews of the saved keychain secrets so the user can
+  // see what's persisted and click Save & Connect without re-
+  // pasting. Empty string when nothing is saved.
+  const [savedAccessPreview, setSavedAccessPreview] = useState<string | null>(
+    null
+  );
+  const [savedSecretPreview, setSavedSecretPreview] = useState<string | null>(
+    null
+  );
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -68,16 +77,48 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
           // Clear secret inputs so they don't linger in DOM.
           setAccessToken("");
           setChannelSecret("");
+          onClose();
         } else {
           setError((msg.error as string) ?? "self-hosted setup failed");
         }
       } else if (msg.type === "line_disconnect_ack") {
         setBusy(false);
+      } else if (msg.type === "line_token_status") {
+        setSavedAccessPreview(
+          msg.has_access_token
+            ? ((msg.access_token_preview as string) ?? null)
+            : null
+        );
+        setSavedSecretPreview(
+          msg.has_channel_secret
+            ? ((msg.channel_secret_preview as string) ?? null)
+            : null
+        );
+      } else if (msg.type === "line_config_status") {
+        if (msg.has_config) {
+          if (typeof msg.host === "string") setBindHost(msg.host as string);
+          if (typeof msg.port === "number") setBindPort(String(msg.port as number));
+          if (typeof msg.public_url === "string") setPublicUrl(msg.public_url as string);
+          if (typeof msg.allowed_users === "string") setAllowedUsers(msg.allowed_users as string);
+          if (typeof msg.allowed_groups === "string") setAllowedGroups(msg.allowed_groups as string);
+          if (typeof msg.allowed_rooms === "string") setAllowedRooms(msg.allowed_rooms as string);
+          if (typeof msg.slow_response_threshold_secs === "number") {
+            setThreshold(String(msg.slow_response_threshold_secs as number));
+          }
+          if (typeof msg.auto_approve_all === "boolean") {
+            setAutoApproveAll(msg.auto_approve_all as boolean);
+          }
+          if (msg.mode === "self_hosted" || msg.mode === "hosted") {
+            setMode(msg.mode as Mode);
+          }
+        }
       }
     });
     send({ type: "line_status" });
+    send({ type: "line_token_status" });
+    send({ type: "line_config_status" });
     return unsub;
-  }, []);
+  }, [onClose]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -97,8 +138,19 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
 
   const handleSelfHostedSubmit = () => {
     const port = parseInt(bindPort, 10);
-    if (!accessToken.trim() || !channelSecret.trim() || !Number.isFinite(port)) {
-      setError("Access token, channel secret, and port are required.");
+    if (!Number.isFinite(port)) {
+      setError("Bind port must be a number.");
+      return;
+    }
+    // Empty inputs are OK when keychain already has the secret —
+    // backend reuses the saved value. Only fail when both the
+    // input AND the keychain preview are empty.
+    if (!accessToken.trim() && !savedAccessPreview) {
+      setError("Channel access token is required (no saved value).");
+      return;
+    }
+    if (!channelSecret.trim() && !savedSecretPreview) {
+      setError("Channel secret is required (no saved value).");
       return;
     }
     setError(null);
@@ -208,6 +260,8 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
                   setThreshold={setThreshold}
                   autoApproveAll={autoApproveAll}
                   setAutoApproveAll={setAutoApproveAll}
+                  savedAccessPreview={savedAccessPreview}
+                  savedSecretPreview={savedSecretPreview}
                   webhookHint={webhookHint}
                   busy={busy}
                   error={error}
@@ -333,6 +387,8 @@ function SelfHostedForm({
   setThreshold,
   autoApproveAll,
   setAutoApproveAll,
+  savedAccessPreview,
+  savedSecretPreview,
   webhookHint,
   busy,
   error,
@@ -358,6 +414,8 @@ function SelfHostedForm({
   setThreshold: (s: string) => void;
   autoApproveAll: boolean;
   setAutoApproveAll: (v: boolean) => void;
+  savedAccessPreview: string | null;
+  savedSecretPreview: string | null;
   webhookHint: string;
   busy: boolean;
   error: string | null;
@@ -379,23 +437,39 @@ function SelfHostedForm({
         </span>
       </div>
 
-      <Field label="Channel access token" required>
+      <Field
+        label="Channel access token"
+        required={!savedAccessPreview}
+        savedPreview={savedAccessPreview}
+      >
         <input
           type="password"
           value={accessToken}
           onChange={(e) => setAccessToken(e.target.value)}
-          placeholder="long-lived token"
+          placeholder={
+            savedAccessPreview
+              ? "(leave blank to reuse saved token, or paste new to override)"
+              : "long-lived token"
+          }
           className="w-full px-3 py-2 rounded font-mono text-xs"
           style={inputStyle}
           autoComplete="off"
         />
       </Field>
-      <Field label="Channel secret" required>
+      <Field
+        label="Channel secret"
+        required={!savedSecretPreview}
+        savedPreview={savedSecretPreview}
+      >
         <input
           type="password"
           value={channelSecret}
           onChange={(e) => setChannelSecret(e.target.value)}
-          placeholder="HMAC verification secret"
+          placeholder={
+            savedSecretPreview
+              ? "(leave blank to reuse saved secret)"
+              : "HMAC verification secret"
+          }
           className="w-full px-3 py-2 rounded font-mono text-xs"
           style={inputStyle}
           autoComplete="off"
@@ -516,17 +590,35 @@ function SelfHostedForm({
 function Field({
   label,
   required,
+  savedPreview,
   children,
 }: {
   label: string;
   required?: boolean;
+  savedPreview?: string | null;
   children: React.ReactNode;
 }) {
   return (
     <div className="space-y-1">
-      <label className="block text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
-        {label}
-        {required && <span style={{ color: "var(--danger, #e06c75)" }}> *</span>}
+      <label
+        className="block text-xs font-semibold flex items-center gap-2"
+        style={{ color: "var(--text-primary)" }}
+      >
+        <span>
+          {label}
+          {required && (
+            <span style={{ color: "var(--danger, #e06c75)" }}> *</span>
+          )}
+        </span>
+        {savedPreview && (
+          <span
+            className="font-mono"
+            style={{ color: "var(--accent)", opacity: 0.85, fontSize: "10px" }}
+            title="Saved in OS keychain. Leave blank to reuse."
+          >
+            saved: {savedPreview}
+          </span>
+        )}
       </label>
       {children}
     </div>

@@ -783,42 +783,62 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
 
             let access_token = pick_str("access_token");
             let channel_secret = pick_str("channel_secret");
-            if access_token.trim().is_empty() || channel_secret.trim().is_empty() {
+            // Empty fields → reuse whatever's in the keychain. Lets
+            // the user click Save & Connect without re-pasting after
+            // the modal pre-fills from saved state. If keychain is
+            // also empty, surface the same "required" error.
+            let access_present = !access_token.trim().is_empty()
+                || crate::secrets::keychain_get_raw(
+                    crate::line::direct::spawn::KEYCHAIN_ACCESS_TOKEN,
+                )
+                .map(|t| !t.is_empty())
+                .unwrap_or(false);
+            let secret_present = !channel_secret.trim().is_empty()
+                || crate::secrets::keychain_get_raw(
+                    crate::line::direct::spawn::KEYCHAIN_SECRET,
+                )
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if !access_present || !secret_present {
                 let payload = serde_json::json!({
                     "type": "line_self_hosted_setup_result",
                     "ok": false,
-                    "error": "access_token and channel_secret are required",
+                    "error": "access_token and channel_secret are required (no saved value in keychain)",
                 });
                 (ctx.dispatch)(payload.to_string());
                 return true;
             }
 
-            // Stash secrets in the OS keychain so they never land in
-            // ~/.config/thclaws/line.json. spawn() loads them from
-            // env → keychain on every connect.
-            if let Err(e) = crate::secrets::keychain_set_raw(
-                crate::line::direct::spawn::KEYCHAIN_ACCESS_TOKEN,
-                &access_token,
-            ) {
-                let payload = serde_json::json!({
-                    "type": "line_self_hosted_setup_result",
-                    "ok": false,
-                    "error": format!("keychain access_token: {e}"),
-                });
-                (ctx.dispatch)(payload.to_string());
-                return true;
+            // Only write keychain when the user actually provided a
+            // new value (avoid replaying the saved bytes back on
+            // every Save & Connect).
+            if !access_token.trim().is_empty() {
+                if let Err(e) = crate::secrets::keychain_set_raw(
+                    crate::line::direct::spawn::KEYCHAIN_ACCESS_TOKEN,
+                    &access_token,
+                ) {
+                    let payload = serde_json::json!({
+                        "type": "line_self_hosted_setup_result",
+                        "ok": false,
+                        "error": format!("keychain access_token: {e}"),
+                    });
+                    (ctx.dispatch)(payload.to_string());
+                    return true;
+                }
             }
-            if let Err(e) = crate::secrets::keychain_set_raw(
-                crate::line::direct::spawn::KEYCHAIN_SECRET,
-                &channel_secret,
-            ) {
-                let payload = serde_json::json!({
-                    "type": "line_self_hosted_setup_result",
-                    "ok": false,
-                    "error": format!("keychain channel_secret: {e}"),
-                });
-                (ctx.dispatch)(payload.to_string());
-                return true;
+            if !channel_secret.trim().is_empty() {
+                if let Err(e) = crate::secrets::keychain_set_raw(
+                    crate::line::direct::spawn::KEYCHAIN_SECRET,
+                    &channel_secret,
+                ) {
+                    let payload = serde_json::json!({
+                        "type": "line_self_hosted_setup_result",
+                        "ok": false,
+                        "error": format!("keychain channel_secret: {e}"),
+                    });
+                    (ctx.dispatch)(payload.to_string());
+                    return true;
+                }
             }
 
             let direct = crate::line::direct::config::DirectConfig {
@@ -1039,6 +1059,70 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let payload = serde_json::json!({
                 "type": "telegram_status",
                 "state": "disconnected",
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "line_config_status" => {
+            // Pre-fill payload for LineConnectModal. Mirrors
+            // telegram_config_status. Reads `~/.config/thclaws/line.json`
+            // + the nested DirectConfig. Tokens never travel here — the
+            // separate `line_token_status` returns masked previews.
+            let payload = match crate::line::LineConfig::load() {
+                Ok(Some(cfg)) => {
+                    let direct = cfg.direct.as_ref();
+                    serde_json::json!({
+                        "type": "line_config_status",
+                        "has_config": true,
+                        "mode": match cfg.mode {
+                            crate::line::LineMode::Hosted => "hosted",
+                            crate::line::LineMode::SelfHosted => "self_hosted",
+                        },
+                        "server_url": cfg.server_url,
+                        "display_name": cfg.display_name,
+                        "picture_url": cfg.picture_url,
+                        "auto_approve_all": cfg.auto_approve_all,
+                        "host": direct.map(|d| d.host.clone()).unwrap_or_default(),
+                        "port": direct.map(|d| d.port).unwrap_or(8646),
+                        "public_url": direct.and_then(|d| d.public_url.clone()),
+                        "allowed_users": direct.map(|d| d.allowed_users_csv.clone()).unwrap_or_default(),
+                        "allowed_groups": direct.map(|d| d.allowed_groups_csv.clone()).unwrap_or_default(),
+                        "allowed_rooms": direct.map(|d| d.allowed_rooms_csv.clone()).unwrap_or_default(),
+                        "slow_response_threshold_secs": direct.map(|d| d.slow_response_threshold_secs).unwrap_or(45),
+                    })
+                }
+                Ok(None) => serde_json::json!({
+                    "type": "line_config_status",
+                    "has_config": false,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "line_config_status",
+                    "has_config": false,
+                    "error": format!("load failed: {e}"),
+                }),
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "line_token_status" => {
+            // Masked previews for the two LINE secrets saved in the
+            // keychain. The modal uses these to show `saved: ABCD…WXYZ`
+            // chips next to the inputs and to let the user click
+            // Save & Connect without re-pasting.
+            let access = crate::secrets::keychain_get_raw(
+                crate::line::direct::spawn::KEYCHAIN_ACCESS_TOKEN,
+            )
+            .filter(|s| !s.is_empty());
+            let secret = crate::secrets::keychain_get_raw(
+                crate::line::direct::spawn::KEYCHAIN_SECRET,
+            )
+            .filter(|s| !s.is_empty());
+            let payload = serde_json::json!({
+                "type": "line_token_status",
+                "has_access_token": access.is_some(),
+                "access_token_preview": access.as_ref().map(|t| mask_token(t)),
+                "has_channel_secret": secret.is_some(),
+                "channel_secret_preview": secret.as_ref().map(|s| mask_token(s)),
             });
             (ctx.dispatch)(payload.to_string());
         }
