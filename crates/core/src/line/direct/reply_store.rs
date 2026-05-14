@@ -43,6 +43,22 @@ impl ReplyTokenStore {
             .map(|(_, recorded)| recorded.elapsed() <= TOKEN_TTL)
             .unwrap_or(false)
     }
+
+    /// Pop the most-recently-recorded token from any chat (single-
+    /// owner / single-user bot scenario). Used by approval flows
+    /// that need a reply token but don't know which chat triggered
+    /// the agent turn at call time. Skips entries past TTL. Garbage-
+    /// collects expired entries along the way.
+    pub fn take_any(&self) -> Option<(String, String)> {
+        let mut g = self.inner.lock().unwrap();
+        g.retain(|_, (_, recorded)| recorded.elapsed() <= TOKEN_TTL);
+        let key = g
+            .iter()
+            .max_by_key(|(_, (_, recorded))| *recorded)
+            .map(|(k, _)| k.clone())?;
+        let (token, _) = g.remove(&key)?;
+        Some((key, token))
+    }
 }
 
 #[cfg(test)]
@@ -94,5 +110,27 @@ mod tests {
         s.put("U1", "x".into());
         let _ = s.take("U1");
         assert!(!s.has_valid("U1"));
+    }
+
+    #[test]
+    fn take_any_pops_most_recent_chat() {
+        let s = ReplyTokenStore::new();
+        s.put("U1", "old".into());
+        std::thread::sleep(Duration::from_millis(10));
+        s.put("U2", "newer".into());
+        let (chat, tok) = s.take_any().expect("token available");
+        assert_eq!(chat, "U2");
+        assert_eq!(tok, "newer");
+        // Second take_any picks the remaining one.
+        let (chat, tok) = s.take_any().expect("still one");
+        assert_eq!(chat, "U1");
+        assert_eq!(tok, "old");
+        assert!(s.take_any().is_none());
+    }
+
+    #[test]
+    fn take_any_returns_none_when_empty() {
+        let s = ReplyTokenStore::new();
+        assert!(s.take_any().is_none());
     }
 }

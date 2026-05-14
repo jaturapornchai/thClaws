@@ -279,28 +279,12 @@ impl ApprovalSink for TelegramApprover {
             }
         }
 
-        match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(decision)) => decision,
-            Ok(Err(_canceled)) => ApprovalDecision::Deny,
-            Err(_elapsed) => {
-                eprintln!(
-                    "[telegram] approval for {} timed out after {:?}; auto-denying",
-                    req.tool_name, self.timeout
-                );
-                if let Ok(mut p) = self.pending.lock() {
-                    let _ = p.take_by_id(&request_id);
-                }
-                if let Some(client) = &self.client {
-                    let _ = client
-                        .send_message(
-                            chat_id,
-                            &format!("⏰ Approval for {} timed out; auto-denied.", req.tool_name),
-                            None,
-                        )
-                        .await;
-                }
-                ApprovalDecision::Deny
-            }
+        // Per ลุงจืด's directive — no timeout auto-deny. Wait until
+        // the user taps Approve / Deny in the inline keyboard. Sender
+        // dropped without sending → Deny (only path that resolves).
+        match rx.await {
+            Ok(decision) => decision,
+            Err(_canceled) => ApprovalDecision::Deny,
         }
     }
 }
@@ -396,12 +380,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_auto_denies() {
-        let a = TelegramApprover::for_test().with_timeout(Duration::from_millis(50));
+    async fn approve_waits_for_explicit_decision_no_timeout() {
+        // ลุงจืด's directive — no auto-deny on timeout. Telegram side
+        // must also block until the user taps Approve/Deny.
+        let a = TelegramApprover::for_test();
         a.note_chat_id(42);
-        let decision = a.approve(&req("Bash")).await;
-        assert_eq!(decision, ApprovalDecision::Deny);
-        assert!(!a.has_pending());
+        let a2 = a.clone();
+        let h = tokio::spawn(async move { a2.approve(&req("Bash")).await });
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        let r = tokio::time::timeout(Duration::from_millis(200), async {
+            h.await.unwrap()
+        })
+        .await;
+        assert!(r.is_err(), "approve must not return before record_decision_*");
     }
 
     #[test]

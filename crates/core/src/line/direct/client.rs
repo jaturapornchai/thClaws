@@ -110,6 +110,47 @@ impl DirectLineClient {
         self.post_reply(&payload).await
     }
 
+    /// Reply with a text message + Quick Reply chips. Used by the
+    /// self-hosted approval flow: send the prompt over the user's
+    /// inbound reply token, attach `Approve` / `Deny` chips whose
+    /// postback `data` payload is parsed by `LineApprover`.
+    /// `items` is a Vec of (label, postback_data) pairs.
+    pub async fn reply_with_quick_reply(
+        &self,
+        reply_token: &str,
+        text: &str,
+        items: &[(String, String)],
+    ) -> Result<(), DirectLineError> {
+        if reply_token.is_empty() {
+            return Err(DirectLineError::NoValidReplyToken);
+        }
+        // Cap text at LINE's 5000-char limit for safety.
+        let body_text: String = text.chars().take(5000).collect();
+        let quick_items: Vec<serde_json::Value> = items
+            .iter()
+            .map(|(label, data)| {
+                serde_json::json!({
+                    "type": "action",
+                    "action": {
+                        "type": "postback",
+                        "label": label,
+                        "data": data,
+                        "displayText": label,
+                    }
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "replyToken": reply_token,
+            "messages": [{
+                "type": "text",
+                "text": body_text,
+                "quickReply": { "items": quick_items }
+            }]
+        });
+        self.post_reply(&payload).await
+    }
+
     async fn post_reply<T: Serialize>(&self, payload: &T) -> Result<(), DirectLineError> {
         let resp = self
             .http

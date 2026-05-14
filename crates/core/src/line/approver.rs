@@ -313,90 +313,99 @@ impl LineApprover {
 #[async_trait]
 impl ApprovalSink for LineApprover {
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
-        // Self-hosted defer-deny path. ApprovalRequest does not carry
-        // a chat_id, so we cannot pick a reply token to send a prompt
-        // to. Per the self-hosted contract (no Push API ever), we
-        // cannot proactively initiate an unsolicited message — so we
-        // deny the tool call and log it. Operators who want approval
-        // gating in self-hosted mode should run in `PermissionMode::Auto`
-        // for the LINE-bound agent, or stay in hosted mode where the
-        // relay's push channel is available.
-        if self.direct_client.is_some() {
-            eprintln!(
-                "[line/direct] approval denied: self_hosted mode does not route prompts (tool={})",
-                req.tool_name
-            );
-            return ApprovalDecision::Deny;
-        }
-
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(request_id.clone(), tx);
         }
 
-        // Plan-10: if the user has a browser chat open, route the
-        // approval prompt there (free + rich-UI modal). Otherwise
-        // fall back to LINE OA push (Quick Reply chips, quota-
-        // using). Approval prompts are unsolicited — `/reply/:id`
-        // would 404 either way, so we use `/push` (LINE OA) or
-        // `/chat-bridge/event` (browser).
+        // Self-hosted Reply-API-only path: pull a reply token from the
+        // inbound store and post the Approve/Deny prompt as a Quick
+        // Reply on it. Per ลุงจืด's directive — reply token only, no
+        // Push. If no token is available, deny + log (the operator
+        // either never DM'd the bot, or the latest token already
+        // expired past 50 s).
+        if let (Some(direct), Some(store)) =
+            (self.direct_client.as_ref(), self.reply_store.as_ref())
+        {
+            let prompt = Self::build_prompt(req);
+            let items: Vec<(String, String)> = Self::build_buttons(&request_id)
+                .into_iter()
+                .map(|b| (b.label, b.data))
+                .collect();
+            let (_chat, token) = match store.take_any() {
+                Some(pair) => pair,
+                None => {
+                    eprintln!(
+                        "[line/direct] approval denied: no fresh reply token (tool={}); DM the bot first to seed one",
+                        req.tool_name
+                    );
+                    if let Ok(mut pending) = self.pending.lock() {
+                        let _ = pending.take_by_id(&request_id);
+                    }
+                    return ApprovalDecision::Deny;
+                }
+            };
+            if let Err(e) = direct
+                .reply_with_quick_reply(&token, &prompt, &items)
+                .await
+            {
+                eprintln!(
+                    "[line/direct] approval prompt send failed: {e}; denying"
+                );
+                if let Ok(mut pending) = self.pending.lock() {
+                    let _ = pending.take_by_id(&request_id);
+                }
+                return ApprovalDecision::Deny;
+            }
+            // Wait indefinitely for the user to tap Approve / Deny.
+            // No timeout auto-deny — per ลุงจืด's directive: wait until
+            // the user decides (postback fires `record_decision_by_id`).
+            match rx.await {
+                Ok(decision) => return decision,
+                Err(_canceled) => return ApprovalDecision::Deny,
+            }
+        }
+
+        // Hosted-mode path. Same change: no timeout auto-deny — wait
+        // until the user replies (LINE OA push prompt with Quick
+        // Reply chips, or browser-modal fallback).
         if let Some(client) = &self.client {
             let prompt = Self::build_prompt(req);
             let buttons = Self::build_buttons(&request_id);
 
             if client.has_browser_connected().await {
-                // Browser modal. Envelope shape matches what the
-                // SPA's onmessage dispatch expects (see
-                // static/chat.html `case 'approval_request'`).
                 let envelope = serde_json::json!({
                     "type": "approval_request",
                     "id": request_id,
                     "tool_name": req.tool_name,
                     "prompt": prompt,
-                    "timeout_secs": self.timeout.as_secs(),
+                    "timeout_secs": 0u64,
                 });
                 if let Err(e) = client.push_chat_event(envelope).await {
-                    eprintln!("[line] browser approval push failed: {e}; falling back to LINE OA");
+                    eprintln!(
+                        "[line] browser approval push failed: {e}; falling back to LINE OA"
+                    );
                     if let Err(e) = client.push_with_buttons(prompt, buttons).await {
-                        eprintln!("[line] LINE OA approval prompt ALSO failed: {e}; auto-denying");
+                        eprintln!(
+                            "[line] LINE OA approval prompt ALSO failed: {e}; denying"
+                        );
                         self.record_decision_by_id(&request_id, ApprovalDecision::Deny);
                         return ApprovalDecision::Deny;
                     }
                 }
             } else if let Err(e) = client.push_with_buttons(prompt, buttons).await {
-                eprintln!("[line] approval prompt failed to send: {e}; auto-denying");
+                eprintln!(
+                    "[line] approval prompt failed to send: {e}; denying"
+                );
                 self.record_decision_by_id(&request_id, ApprovalDecision::Deny);
                 return ApprovalDecision::Deny;
             }
         }
 
-        match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(decision)) => decision,
-            Ok(Err(_canceled)) => {
-                // Sender dropped without sending. Treat as deny.
-                ApprovalDecision::Deny
-            }
-            Err(_elapsed) => {
-                eprintln!(
-                    "[line] approval for {} timed out after {:?}; auto-denying",
-                    req.tool_name, self.timeout
-                );
-                // Drop the pending entry so a late reply doesn't
-                // resurrect an already-denied decision.
-                if let Ok(mut pending) = self.pending.lock() {
-                    let _ = pending.take_by_id(&request_id);
-                }
-                if let Some(client) = &self.client {
-                    let _ = client
-                        .push(format!(
-                            "⏰ Approval for {} timed out; auto-denied.",
-                            req.tool_name
-                        ))
-                        .await;
-                }
-                ApprovalDecision::Deny
-            }
+        match rx.await {
+            Ok(decision) => decision,
+            Err(_canceled) => ApprovalDecision::Deny,
         }
     }
 }
@@ -485,14 +494,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_auto_denies() {
-        let approver = LineApprover::for_test().with_timeout(Duration::from_millis(50));
+    async fn approve_waits_for_explicit_decision_no_timeout() {
+        // ลุงจืด's directive — no auto-deny on timeout. The approver
+        // must block until the user replies (or the future is
+        // cancelled by the caller).
+        let approver = LineApprover::for_test();
         let a = approver.clone();
-        let decision = a.approve(&req("Bash")).await;
-        assert_eq!(decision, ApprovalDecision::Deny);
-        // Pending entry must be cleared so a late reply doesn't
-        // resurrect a different decision.
-        assert!(!approver.has_pending());
+        let handle = tokio::spawn(async move { a.approve(&req("Bash")).await });
+        // Yield a few times so the approve future registers pending,
+        // then wait beyond what was the old 60s default. We must NOT
+        // see Deny here.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        let r = tokio::time::timeout(Duration::from_millis(200), async {
+            handle.await.unwrap()
+        })
+        .await;
+        // Timed out from outside — that's the contract. The approver
+        // itself never auto-denies.
+        assert!(r.is_err(), "approve must not return before record_decision_*");
     }
 
     #[test]

@@ -227,14 +227,24 @@ async fn spawn_self_hosted(
         .await
         .map_err(|e| format!("self_hosted spawn: {e}"))?;
 
-    // Real sink that reads/writes the SAME stores the server holds.
-    let real_sink = Arc::new(DirectSink::new(
-        input_tx,
+    // Build the approver early so the real sink can hold an Arc to
+    // it — the approval postback path goes sink → approver directly
+    // (no input_tx hop, same deadlock-fix reasoning as Telegram).
+    let approver = Arc::new(LineApprover::for_self_hosted(
         direct_handle.client.clone(),
         direct_handle.reply_store.clone(),
-        direct_handle.slow_cache.clone(),
-        direct_handle.threshold,
     ));
+    // Real sink that reads/writes the SAME stores the server holds.
+    let real_sink: Arc<dyn super::direct::server::DirectEventSink> = Arc::new(
+        DirectSink::new(
+            input_tx,
+            direct_handle.client.clone(),
+            direct_handle.reply_store.clone(),
+            direct_handle.slow_cache.clone(),
+            direct_handle.threshold,
+        )
+        .with_approver(approver.clone()),
+    );
     // Swap the placeholder for the real sink. The server's state
     // holds a trait object; the swap is atomic at the Arc level.
     // (Internally `DirectServerState.sink` is `Arc<dyn ...>` and
@@ -259,11 +269,10 @@ async fn spawn_self_hosted(
 
     let server_url = direct_config.webhook_display_url();
     let cancel = direct_handle.cancel.clone();
-    // No relay client in self-hosted mode.
-    let approver = Arc::new(LineApprover::for_self_hosted(
-        direct_handle.client.clone(),
-        direct_handle.reply_store.clone(),
-    ));
+    // `approver` was constructed before `real_sink` so the sink could
+    // own an `Arc<LineApprover>` for the postback path. Reuse it as
+    // the handle's approver — same instance, no duplicate pending
+    // registry.
     // Self-hosted has no separate session loop — the axum server IS
     // the session. We provide a dummy join handle that resolves as
     // soon as the cancel fires so the worker's existing

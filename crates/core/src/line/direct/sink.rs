@@ -33,6 +33,10 @@ pub struct DirectSink {
     pub reply_store: Arc<ReplyTokenStore>,
     pub slow_cache: Arc<SlowResponseCache>,
     pub threshold: Duration,
+    /// Shared `LineApprover` so approval postbacks can resolve
+    /// the pending oneshot directly from the webhook task. None
+    /// when the bridge runs without per-tool approval (Auto mode).
+    pub approver: Option<Arc<crate::line::approver::LineApprover>>,
 }
 
 impl DirectSink {
@@ -49,7 +53,16 @@ impl DirectSink {
             reply_store,
             slow_cache,
             threshold,
+            approver: None,
         }
+    }
+
+    pub fn with_approver(
+        mut self,
+        approver: Arc<crate::line::approver::LineApprover>,
+    ) -> Self {
+        self.approver = Some(approver);
+        self
     }
 }
 
@@ -177,6 +190,31 @@ impl DirectEventSink for DirectSink {
                 cache_for_reply.set_ready(&req_for_reply, String::new());
             }
         });
+    }
+
+    async fn on_approval_postback(
+        &self,
+        chat_id: String,
+        reply_token: String,
+        data: String,
+    ) {
+        // The user tapped Approve / Deny in the Quick Reply chip that
+        // `LineApprover` posted earlier. The original reply token was
+        // consumed by that prompt — THIS event carries a FRESH one
+        // good for ~60s. Stash it so the agent's final answer reply
+        // can use it after the tool finishes.
+        self.reply_store.put(&chat_id, reply_token);
+        if let Some(approver) = self.approver.as_ref() {
+            if approver.record_decision_from_postback(&data).is_none() {
+                eprintln!(
+                    "[line/direct] approval postback dropped — no pending approval matches data={data}"
+                );
+            }
+        } else {
+            eprintln!(
+                "[line/direct] approval postback received but no approver wired into sink"
+            );
+        }
     }
 
     async fn on_show_response_postback(

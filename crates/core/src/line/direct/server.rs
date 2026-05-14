@@ -46,6 +46,21 @@ pub trait DirectEventSink: Send + Sync + 'static {
         reply_token: String,
         request_id: String,
     );
+
+    /// Approval postback arrived. `data` carries the
+    /// `tool:allow:<request_id>` or `tool:deny:<request_id>` payload
+    /// emitted by the `LineApprover`. `reply_token` is FRESH from
+    /// this postback event — implementor stashes it so the agent
+    /// can use it for its actual answer reply once the tool
+    /// completes. Default no-op so existing test impls keep
+    /// compiling without forced-update.
+    async fn on_approval_postback(
+        &self,
+        _chat_id: String,
+        _reply_token: String,
+        _data: String,
+    ) {
+    }
 }
 
 pub struct DirectServerState {
@@ -131,7 +146,23 @@ async fn dispatch_event(state: Arc<DirectServerState>, event: Event) {
             let Some(chat_id) = source.chat_id() else {
                 return;
             };
-            if let Ok(p) = serde_json::from_str::<ShowResponsePostback>(&postback.data) {
+            // Approval postbacks use a flat `tool:<verb>:<req_id>`
+            // string; slow-response postbacks use a JSON envelope
+            // `{"action":"show_response",...}`. Dispatch by shape so
+            // adding the approval surface didn't break the existing
+            // slow-response path.
+            if postback.data.starts_with("tool:") {
+                state
+                    .sink
+                    .on_approval_postback(
+                        chat_id.to_string(),
+                        reply_token,
+                        postback.data,
+                    )
+                    .await;
+            } else if let Ok(p) =
+                serde_json::from_str::<ShowResponsePostback>(&postback.data)
+            {
                 if p.action == "show_response" {
                     state
                         .sink
