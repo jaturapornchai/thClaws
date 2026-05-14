@@ -96,6 +96,10 @@ The same `Agent` loop, `Session`, and `ToolRegistry` back every UX:
 
 - **Telegram bot bridge.** Drive the agent from a Telegram bot (BotFather token) — long-polling default, optional webhook for production. Allowlist on numeric Telegram IDs, group `@mention` gating, inline-keyboard approvals. See [docs/telegram-bridge.md](docs/telegram-bridge.md).
 
+- **LINE LIFF in-app chat.** In-LINE WebView that streams agent text live — same allowlist gate as the webhook, opens from a Rich Menu link. See [docs/line-liff.md](docs/line-liff.md).
+
+- **คู่มือภาษาไทย** (Telegram + LINE OA + LIFF + Tailscale Funnel) — [docs/SETUP_TH.md](docs/SETUP_TH.md).
+
 ---
 
 ## Installation
