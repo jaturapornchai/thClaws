@@ -1003,13 +1003,21 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 eprintln!("[telegram] config save failed: {e}");
             }
 
-            let _ = ctx
-                .shared
-                .input_tx
-                .send(crate::shared_session::ShellInput::TelegramConnect(cfg));
+            // `connect=false` (Save-only): persist + return without
+            // spawning the bridge. Defaults to true → save + connect,
+            // preserving the original telegram_setup behaviour.
+            let do_connect = pick_bool("connect", true);
+            if do_connect {
+                let _ = ctx
+                    .shared
+                    .input_tx
+                    .send(crate::shared_session::ShellInput::TelegramConnect(cfg));
+            }
             let payload = serde_json::json!({
                 "type": "telegram_setup_result",
                 "ok": true,
+                "saved": true,
+                "connected": do_connect,
             });
             (ctx.dispatch)(payload.to_string());
         }

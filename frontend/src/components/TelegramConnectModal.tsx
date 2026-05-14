@@ -97,7 +97,7 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  const handleSubmit = () => {
+  const submitSetup = (connect: boolean) => {
     // Empty token + saved token in keychain → reuse the saved one
     // (backend resolves on receipt). Empty token + no saved token →
     // surface the requirement locally for a fast error.
@@ -118,6 +118,7 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
     setBusy(true);
     send({
       type: "telegram_setup",
+      connect,
       bot_token: botToken.trim(),
       webhook_secret_token: webhookSecret.trim(),
       mode,
@@ -131,6 +132,9 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
       allow_any_user_in_group: allowAnyUserInGroup,
     });
   };
+
+  const handleSubmit = () => submitSetup(true);
+  const handleSaveOnly = () => submitSetup(false);
 
   const handleDisconnect = () => {
     setBusy(true);
@@ -505,6 +509,19 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
               }}
             >
               Cancel
+            </button>
+            <button
+              onClick={handleSaveOnly}
+              disabled={busy}
+              className="px-3 py-1 rounded text-xs"
+              style={{
+                background: "var(--bg-primary)",
+                border: "1px solid var(--border)",
+                color: "var(--text-primary)",
+              }}
+              title="Persist settings to telegram.json + keychain without spawning the bridge. Useful for prepping config without immediately going live."
+            >
+              Save
             </button>
             <button
               onClick={handleSubmit}
