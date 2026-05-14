@@ -68,6 +68,10 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
           // Clear secret inputs so they don't linger in the DOM.
           setBotToken("");
           setWebhookSecret("");
+          // Auto-close on successful Save/Connect — ลุงจืด wants
+          // the modal to confirm + dismiss itself once persistence
+          // succeeded.
+          onClose();
         } else {
           setError((msg.error as string) ?? "Telegram setup failed");
         }
@@ -79,15 +83,57 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
         } else {
           setSavedTokenPreview(null);
         }
+      } else if (msg.type === "telegram_config_status") {
+        // Pre-fill the form from the saved telegram.json so reopening
+        // the modal shows what's actually persisted (was: every field
+        // reset to defaults regardless of saved state).
+        if (msg.has_config) {
+          if (typeof msg.mode === "string") {
+            setMode(
+              (msg.mode as string) === "webhook" ? "webhook" : "long_poll"
+            );
+          }
+          if (typeof msg.webhook_host === "string") {
+            setWebhookHost(msg.webhook_host as string);
+          }
+          if (typeof msg.webhook_port === "number") {
+            setWebhookPort(String(msg.webhook_port as number));
+          }
+          if (typeof msg.webhook_public_url === "string") {
+            setWebhookPublicUrl(msg.webhook_public_url as string);
+          }
+          if (typeof msg.allowed_users === "string") {
+            setAllowedUsers(msg.allowed_users as string);
+          }
+          if (typeof msg.allowed_chats === "string") {
+            setAllowedChats(msg.allowed_chats as string);
+          }
+          if (typeof msg.require_mention_in_groups === "boolean") {
+            setRequireMention(msg.require_mention_in_groups as boolean);
+          }
+          if (typeof msg.allow_open_mode === "boolean") {
+            setAllowOpenMode(msg.allow_open_mode as boolean);
+          }
+          if (typeof msg.allow_any_user_in_group === "boolean") {
+            setAllowAnyUserInGroup(msg.allow_any_user_in_group as boolean);
+          }
+          // Open Advanced if anything beyond bare defaults is saved
+          // so the user can see at-a-glance what's already locked in.
+          const nonDefault =
+            (msg.allowed_users as string)?.trim().length > 0 ||
+            (msg.allowed_chats as string)?.trim().length > 0 ||
+            (msg.mode as string) === "webhook" ||
+            (msg.allow_open_mode as boolean) === true ||
+            (msg.allow_any_user_in_group as boolean) === true;
+          if (nonDefault) setShowAdvanced(true);
+        }
       }
     });
-    // Ask backend: is a token already saved? Reply populates the
-    // placeholder so the user knows they can click Connect without
-    // re-pasting.
     send({ type: "telegram_token_status" });
+    send({ type: "telegram_config_status" });
     send({ type: "telegram_status" });
     return unsub;
-  }, []);
+  }, [onClose]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

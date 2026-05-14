@@ -1036,6 +1036,43 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        "telegram_config_status" => {
+            // Hand the saved non-secret settings back to the GUI so
+            // the modal can pre-fill its fields. Tokens are NEVER
+            // included here — secrets stay in the keychain layer.
+            // Absent file (Ok(None)) → reply with `has_config: false`
+            // and let the GUI keep its defaults.
+            let payload = match crate::telegram::TelegramConfig::load() {
+                Ok(Some(cfg)) => serde_json::json!({
+                    "type": "telegram_config_status",
+                    "has_config": true,
+                    "mode": match cfg.mode {
+                        crate::telegram::TelegramMode::LongPoll => "long_poll",
+                        crate::telegram::TelegramMode::Webhook => "webhook",
+                    },
+                    "long_poll_timeout_secs": cfg.long_poll_timeout_secs,
+                    "webhook_host": cfg.webhook_host,
+                    "webhook_port": cfg.webhook_port,
+                    "webhook_public_url": cfg.webhook_public_url,
+                    "allowed_users": cfg.allowed_users_csv,
+                    "allowed_chats": cfg.allowed_chats_csv,
+                    "require_mention_in_groups": cfg.require_mention_in_groups,
+                    "allow_open_mode": cfg.allow_open_mode,
+                    "allow_any_user_in_group": cfg.allow_any_user_in_group,
+                }),
+                Ok(None) => serde_json::json!({
+                    "type": "telegram_config_status",
+                    "has_config": false,
+                }),
+                Err(e) => serde_json::json!({
+                    "type": "telegram_config_status",
+                    "has_config": false,
+                    "error": format!("load failed: {e}"),
+                }),
+            };
+            (ctx.dispatch)(payload.to_string());
+        }
+
         "telegram_token_status" => {
             // Frontend asks on modal open: "is a token already saved?"
             // Reply with masked preview so the UI can show
