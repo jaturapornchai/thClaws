@@ -24,6 +24,17 @@ pub mod spawn;
 pub mod types;
 pub mod webhook;
 
+// Task-local chat-id used by per-chat approval routing. The
+// `ShellInput::TelegramMessage` worker arm enters a scope keyed by
+// the message's `chat_id`; `TelegramApprover::approve` reads from
+// this scope so the approval prompt lands in the chat that
+// originated the tool call (not whichever chat was last active
+// across all users). Falls back to the global `last_chat_id` when
+// the approval is fired outside a Telegram-driven turn (e.g. GUI).
+tokio::task_local! {
+    pub static CURRENT_CHAT_ID: i64;
+}
+
 // `sink` bridges into `shared_session::ShellInput` which is gui-gated
 // (CLI builds have no worker channel). The webhook + long-poll
 // transports remain available in CLI builds for testing.

@@ -962,6 +962,135 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             (ctx.dispatch)(payload.to_string());
         }
 
+        "telegram_test" => {
+            // getMe smoke test. Resolves the current bot token from
+            // keychain / env, calls Telegram's getMe, returns the
+            // bot's username + id. Surfaces 401 / 404 / network
+            // failures clearly so the user can diagnose setup
+            // problems before going live.
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                match crate::telegram::spawn::load_bot_token_pub() {
+                    Ok(tok) => match crate::telegram::client::TelegramClient::new(tok) {
+                        Ok(client) => match client.get_me().await {
+                            Ok(body) => {
+                                let username = body
+                                    .get("username")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("?");
+                                let id = body
+                                    .get("id")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                let first_name = body
+                                    .get("first_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let payload = serde_json::json!({
+                                    "type": "telegram_test_result",
+                                    "ok": true,
+                                    "bot_username": username,
+                                    "bot_id": id,
+                                    "first_name": first_name,
+                                });
+                                (dispatch)(payload.to_string());
+                            }
+                            Err(e) => {
+                                let payload = serde_json::json!({
+                                    "type": "telegram_test_result",
+                                    "ok": false,
+                                    "error": format!("{e}"),
+                                });
+                                (dispatch)(payload.to_string());
+                            }
+                        },
+                        Err(e) => {
+                            let payload = serde_json::json!({
+                                "type": "telegram_test_result",
+                                "ok": false,
+                                "error": format!("client init: {e}"),
+                            });
+                            (dispatch)(payload.to_string());
+                        }
+                    },
+                    Err(e) => {
+                        let payload = serde_json::json!({
+                            "type": "telegram_test_result",
+                            "ok": false,
+                            "error": format!("no bot token in keychain or env: {e}"),
+                        });
+                        (dispatch)(payload.to_string());
+                    }
+                }
+            });
+        }
+
+        "telegram_send_test" => {
+            // Send a hard-coded test message to the chat_id the user
+            // provides (or, if omitted, asks the user to DM the bot
+            // once and try again — the GUI can plumb chat_id from
+            // the active session if needed).
+            let chat_id = msg.get("chat_id").and_then(|v| v.as_i64());
+            let text = msg
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "🧪 test from thClaws".to_string());
+            let dispatch = ctx.dispatch.clone();
+            tokio::spawn(async move {
+                let chat = match chat_id {
+                    Some(c) => c,
+                    None => {
+                        let payload = serde_json::json!({
+                            "type": "telegram_send_test_result",
+                            "ok": false,
+                            "error": "chat_id is required — DM the bot once from your Telegram account, then look at the latest update to find your numeric user id (paste it here).",
+                        });
+                        (dispatch)(payload.to_string());
+                        return;
+                    }
+                };
+                match crate::telegram::spawn::load_bot_token_pub() {
+                    Ok(tok) => match crate::telegram::client::TelegramClient::new(tok) {
+                        Ok(client) => match client.send_message(chat, &text, None).await {
+                            Ok(()) => {
+                                let payload = serde_json::json!({
+                                    "type": "telegram_send_test_result",
+                                    "ok": true,
+                                    "chat_id": chat,
+                                });
+                                (dispatch)(payload.to_string());
+                            }
+                            Err(e) => {
+                                let payload = serde_json::json!({
+                                    "type": "telegram_send_test_result",
+                                    "ok": false,
+                                    "error": format!("{e}"),
+                                });
+                                (dispatch)(payload.to_string());
+                            }
+                        },
+                        Err(e) => {
+                            let payload = serde_json::json!({
+                                "type": "telegram_send_test_result",
+                                "ok": false,
+                                "error": format!("client init: {e}"),
+                            });
+                            (dispatch)(payload.to_string());
+                        }
+                    },
+                    Err(e) => {
+                        let payload = serde_json::json!({
+                            "type": "telegram_send_test_result",
+                            "ok": false,
+                            "error": format!("no bot token: {e}"),
+                        });
+                        (dispatch)(payload.to_string());
+                    }
+                }
+            });
+        }
+
         "telegram_disconnect" => {
             let _ = ctx
                 .shared

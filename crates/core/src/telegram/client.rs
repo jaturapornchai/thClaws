@@ -180,6 +180,41 @@ impl TelegramClient {
         self.post_json("deleteWebhook", &body).await
     }
 
+    /// `getMe` — verify the bot token is valid and learn the bot's
+    /// username / id. Returns the parsed `result` object so callers
+    /// can surface bot details in a setup wizard. 401 = revoked token;
+    /// 404 = malformed token (path doesn't resolve a bot).
+    pub async fn get_me(&self) -> Result<Value, TelegramError> {
+        let url = self.endpoint("getMe");
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| TelegramError::Http(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| TelegramError::Http(e.to_string()))?;
+        if !status.is_success() {
+            return Err(TelegramError::Api {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        let parsed: ApiResponse<Value> = serde_json::from_str(&text)
+            .map_err(|e| TelegramError::Http(format!("parse getMe: {e}")))?;
+        if !parsed.ok {
+            return Err(TelegramError::NotOk {
+                description: parsed.description.unwrap_or_default(),
+            });
+        }
+        parsed.result.ok_or_else(|| TelegramError::NotOk {
+            description: "getMe ok=true but result missing".into(),
+        })
+    }
+
     async fn post_json<T: Serialize>(
         &self,
         method: &str,

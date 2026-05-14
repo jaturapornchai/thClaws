@@ -106,13 +106,27 @@ impl TelegramSink {
                 eprintln!("[telegram] answerCallbackQuery failed: {e}");
             }
         });
+        // Resolve the approval directly via the shared `TelegramApprover`
+        // rather than routing through `input_tx`. The worker's input
+        // loop is BLOCKED inside `ShellInput::TelegramMessage` awaiting
+        // the approver's oneshot — sending a TelegramCallback into the
+        // same channel would deadlock (the callback arm only runs after
+        // the message arm returns, but the message arm can't return
+        // until the approver resolves). Calling
+        // `record_decision_from_postback` here fires the oneshot
+        // directly from the long-poll / webhook task.
         if let Some(data) = cb.data {
-            if self
-                .input_tx
-                .send(ShellInput::TelegramCallback { data })
-                .is_err()
-            {
-                eprintln!("[telegram] worker unavailable for callback");
+            match self.approver.as_ref() {
+                Some(approver) => {
+                    if approver.record_decision_from_postback(&data).is_none() {
+                        eprintln!(
+                            "[telegram] callback dropped — no pending approval matches data={data}"
+                        );
+                    }
+                }
+                None => {
+                    eprintln!("[telegram] callback received but no approver configured");
+                }
             }
         }
     }

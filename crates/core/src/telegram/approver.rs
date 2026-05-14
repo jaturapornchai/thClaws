@@ -240,15 +240,23 @@ impl TelegramApprover {
 #[async_trait]
 impl ApprovalSink for TelegramApprover {
     async fn approve(&self, req: &ApprovalRequest) -> ApprovalDecision {
-        let chat_id = match self.last_chat_id() {
-            Some(c) => c,
-            None => {
-                eprintln!(
-                    "[telegram] approval denied: no_chat_known (tool={})",
-                    req.tool_name
-                );
-                return ApprovalDecision::Deny;
-            }
+        // Per-chat routing: try the task-local scope first (set by
+        // the TelegramMessage worker arm around handle_line). Falls
+        // back to the last-seen chat across all users only when the
+        // approval is fired outside a Telegram-driven turn (no
+        // ambient chat → use the legacy global default).
+        let chat_id = match super::CURRENT_CHAT_ID.try_with(|c| *c) {
+            Ok(c) => c,
+            Err(_) => match self.last_chat_id() {
+                Some(c) => c,
+                None => {
+                    eprintln!(
+                        "[telegram] approval denied: no_chat_known (tool={})",
+                        req.tool_name
+                    );
+                    return ApprovalDecision::Deny;
+                }
+            },
         };
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();

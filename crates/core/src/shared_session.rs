@@ -2535,7 +2535,7 @@ async fn run_worker(
                 ));
             }
             ShellInput::TelegramMessage {
-                chat_id: _chat_id,
+                chat_id,
                 reply_to_message_id: _reply_to,
                 text,
                 respond,
@@ -2544,6 +2544,13 @@ async fn run_worker(
                 // oneshot with the captured final text. The sink owns
                 // the actual `sendMessage` call (it knows chat_id +
                 // reply target). We just produce the text.
+                //
+                // Per-chat approval routing: scope the turn with the
+                // originating chat_id so any approval prompts the
+                // agent triggers route back to THIS chat (not whichever
+                // chat happened to be active last across all users).
+                // `TelegramApprover::approve` reads the scope via the
+                // `CURRENT_CHAT_ID` task-local.
                 let mut event_rx = events_tx.subscribe();
                 let collector = tokio::spawn(async move {
                     let mut buf = String::new();
@@ -2567,7 +2574,12 @@ async fn run_worker(
                     buf
                 });
                 crate::tools::ask::set_line_driven_turn(true);
-                handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+                crate::telegram::CURRENT_CHAT_ID
+                    .scope(chat_id, async {
+                        handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self)
+                            .await;
+                    })
+                    .await;
                 crate::tools::ask::set_line_driven_turn(false);
                 let final_text = collector.await.unwrap_or_default();
                 let _ = respond.send(final_text);

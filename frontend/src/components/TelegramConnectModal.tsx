@@ -42,6 +42,12 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
   const [allowedChats, setAllowedChats] = useState("");
   const [requireMention, setRequireMention] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [testChatId, setTestChatId] = useState("");
+  const [testResult, setTestResult] = useState<{
+    kind: "ok" | "fail";
+    text: string;
+  } | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -64,6 +70,37 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
         }
       } else if (msg.type === "telegram_disconnect_result") {
         setBusy(false);
+      } else if (msg.type === "telegram_test_result") {
+        setTestBusy(false);
+        if (msg.ok) {
+          const uname = msg.bot_username as string | undefined;
+          const id = msg.bot_id as number | undefined;
+          const fname = msg.first_name as string | undefined;
+          setTestResult({
+            kind: "ok",
+            text: `✅ Token valid — @${uname ?? "?"} (id ${id ?? "?"}${
+              fname ? `, "${fname}"` : ""
+            })`,
+          });
+        } else {
+          setTestResult({
+            kind: "fail",
+            text: `❌ ${(msg.error as string) ?? "test failed"}`,
+          });
+        }
+      } else if (msg.type === "telegram_send_test_result") {
+        setTestBusy(false);
+        if (msg.ok) {
+          setTestResult({
+            kind: "ok",
+            text: `✅ Test message sent to chat ${msg.chat_id as number}.`,
+          });
+        } else {
+          setTestResult({
+            kind: "fail",
+            text: `❌ ${(msg.error as string) ?? "send failed"}`,
+          });
+        }
       }
     });
     return unsub;
@@ -110,6 +147,30 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
   const handleDisconnect = () => {
     setBusy(true);
     send({ type: "telegram_disconnect" });
+  };
+
+  const handleTestGetMe = () => {
+    setTestResult(null);
+    setTestBusy(true);
+    send({ type: "telegram_test" });
+  };
+
+  const handleSendTest = () => {
+    const cid = parseInt(testChatId, 10);
+    if (!Number.isFinite(cid)) {
+      setTestResult({
+        kind: "fail",
+        text: "❌ chat_id must be a number (your Telegram numeric user id).",
+      });
+      return;
+    }
+    setTestResult(null);
+    setTestBusy(true);
+    send({
+      type: "telegram_send_test",
+      chat_id: cid,
+      text: "🧪 test message from thClaws — if you see this, bidirectional send works.",
+    });
   };
 
   const connected = status.state === "connected";
@@ -184,7 +245,84 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
                 Disconnect
               </button>
             </div>
-          ) : (
+          ) : null}
+
+          {/* Test panel — appears whenever a token is stored in the
+              keychain. getMe + send-test buttons surface the most
+              common setup mistakes (revoked token, wrong chat_id)
+              before they show up as silent drops in production. */}
+          <div
+            className="rounded p-2 space-y-2"
+            style={{
+              background: "var(--bg-primary)",
+              border: "1px solid var(--border)",
+            }}
+          >
+            <div
+              className="text-xs font-semibold"
+              style={{ color: "var(--text-primary)" }}
+            >
+              🧪 Test thClaws ↔ Telegram
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleTestGetMe}
+                disabled={testBusy}
+                className="px-2 py-1 rounded text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  border: "1px solid var(--border)",
+                }}
+              >
+                {testBusy ? "…" : "Test getMe (verify token)"}
+              </button>
+              <input
+                type="text"
+                value={testChatId}
+                onChange={(e) => setTestChatId(e.target.value)}
+                placeholder="chat_id (your tg user id)"
+                className="px-2 py-1 rounded font-mono text-xs flex-1 min-w-[140px]"
+                style={{
+                  background: "var(--bg-secondary)",
+                  border: "1px solid var(--border)",
+                  color: "var(--text-primary)",
+                }}
+              />
+              <button
+                onClick={handleSendTest}
+                disabled={testBusy || !testChatId.trim()}
+                className="px-2 py-1 rounded text-xs"
+                style={{
+                  background: "var(--bg-secondary)",
+                  border: "1px solid var(--border)",
+                }}
+              >
+                Send test
+              </button>
+            </div>
+            {testResult && (
+              <div
+                className="text-xs p-2 rounded"
+                style={{
+                  background:
+                    testResult.kind === "ok"
+                      ? "rgba(80,200,120,0.12)"
+                      : "rgba(255,80,80,0.12)",
+                  color:
+                    testResult.kind === "ok"
+                      ? "var(--success, #50c878)"
+                      : "var(--error, #f08080)",
+                  fontFamily: "var(--font-mono, monospace)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {testResult.text}
+              </div>
+            )}
+          </div>
+
+          {!connected && (
             <div
               className="flex items-start gap-2 p-2 rounded text-xs"
               style={{ background: "var(--bg-primary)" }}
