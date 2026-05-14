@@ -87,7 +87,7 @@ pub async fn spawn(
     let reply_store = Arc::new(ReplyTokenStore::new());
     let slow_cache = Arc::new(SlowResponseCache::new());
     let dedup = Arc::new(DedupStore::new());
-    spawn_with_stores(config, sink, client, reply_store, slow_cache, dedup).await
+    spawn_with_stores(config, sink, client, reply_store, slow_cache, dedup, None).await
 }
 
 /// Same as [`spawn`] but the caller supplies the shared state. Used
@@ -102,6 +102,7 @@ pub async fn spawn_with_stores(
     reply_store: Arc<ReplyTokenStore>,
     slow_cache: Arc<SlowResponseCache>,
     dedup: Arc<DedupStore>,
+    liff: Option<Arc<super::liff::LiffBridge>>,
 ) -> Result<DirectHandle, DirectLineError> {
     let secret = load_channel_secret()?;
     let threshold = config.threshold();
@@ -117,6 +118,7 @@ pub async fn spawn_with_stores(
         reply_store: reply_store.clone(),
         slow_cache: slow_cache.clone(),
         sink,
+        liff,
     });
     let app = router(state);
 

@@ -8,6 +8,7 @@ pub mod client;
 pub mod config;
 pub mod dedup;
 pub mod errors;
+pub mod liff;
 pub mod reply_store;
 pub mod server;
 pub mod signature;

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>thClaws — LINE Chat</title>
+  <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --bg-2: #111;
+      --bg-3: #1a1a1a;
+      --border: #222;
+      --fg: #e6e6e6;
+      --fg-dim: #888;
+      --accent: #3ecf8e;
+      --accent-fg: #0a0a0a;
+      --user-bg: #2a9d6a;
+      --user-fg: #ffffff;
+      --danger: #e06c75;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+    body {
+      font-family: -apple-system, "Segoe UI", "Helvetica Neue", "Noto Sans Thai", sans-serif;
+      font-size: 14px;
+      display: flex; flex-direction: column;
+      overscroll-behavior: contain;
+    }
+    .topbar {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-2);
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-dim); flex-shrink: 0; }
+    .dot.live { background: var(--accent); }
+    .dot.error { background: var(--danger); }
+    .title { font-weight: 600; color: var(--fg); }
+    .who { color: var(--fg-dim); margin-left: auto; font-size: 11px; }
+    .scroll {
+      flex: 1; overflow-y: auto; padding: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .msg {
+      max-width: 88%;
+      padding: 8px 11px; border-radius: 12px;
+      white-space: pre-wrap; word-break: break-word;
+      line-height: 1.45;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: var(--user-bg); color: var(--user-fg);
+      border-bottom-right-radius: 4px;
+    }
+    .msg.bot {
+      align-self: flex-start;
+      background: var(--bg-3); color: var(--fg);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .msg.bot.thinking { color: var(--fg-dim); font-style: italic; }
+    .msg.tool {
+      align-self: flex-start;
+      background: transparent; color: var(--fg-dim);
+      font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+      font-size: 12px; padding: 2px 0;
+    }
+    .msg.err {
+      align-self: flex-start;
+      background: rgba(224,108,117,0.12); color: var(--danger);
+      border: 1px solid rgba(224,108,117,0.25);
+    }
+    .composer {
+      display: flex; gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-2);
+    }
+    .composer textarea {
+      flex: 1; min-height: 36px; max-height: 120px;
+      padding: 8px 11px; border-radius: 10px;
+      background: var(--bg-3); color: var(--fg);
+      border: 1px solid var(--border);
+      resize: none; font: inherit; outline: none;
+    }
+    .composer textarea:focus { border-color: var(--accent); }
+    .composer button {
+      padding: 0 16px; border-radius: 10px;
+      background: var(--accent); color: var(--accent-fg);
+      border: 0; font-weight: 600; cursor: pointer;
+      min-height: 36px;
+    }
+    .composer button:disabled { opacity: 0.45; cursor: default; }
+    .cursor {
+      display: inline-block; width: 7px; height: 14px;
+      background: var(--accent); margin-left: 2px; vertical-align: text-bottom;
+      animation: blink 1s steps(2) infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="dot" id="dot"></span>
+    <span class="title">thClaws</span>
+    <span class="who" id="who"></span>
+  </div>
+  <div class="scroll" id="scroll" aria-live="polite"></div>
+  <form class="composer" id="form" autocomplete="off">
+    <textarea id="input" placeholder="Message…" rows="1" enterkeyhint="send"></textarea>
+    <button type="submit" id="send">Send</button>
+  </form>
+  <script>
+  (function () {
+    "use strict";
+
+    // ── Config emitted server-side ─────────────────────────────────
+    // The Rust handler replaces __LIFF_ID__ with the configured id.
+    // Empty string = LIFF not configured; we fall back to anonymous
+    // mode (useful for `tailscale serve` smoke tests in a browser).
+    var LIFF_ID = "__LIFF_ID__";
+
+    var scrollEl = document.getElementById("scroll");
+    var dotEl = document.getElementById("dot");
+    var whoEl = document.getElementById("who");
+    var formEl = document.getElementById("form");
+    var inputEl = document.getElementById("input");
+    var sendEl = document.getElementById("send");
+
+    var ws = null;
+    var pendingBotMsg = null;
+    var pendingBuf = "";
+    var idToken = null;
+    var profile = null;
+
+    function setStatus(state) {
+      dotEl.className = "dot " + (state === "live" ? "live" : state === "error" ? "error" : "");
+    }
+
+    function escapeHtml(s) {
+      return s
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    function autolink(s) {
+      return escapeHtml(s).replace(
+        /(https?:\/\/[^\s<]+)/g,
+        function (m) { return '<a href="' + m + '" target="_blank" rel="noreferrer noopener" style="color:var(--accent)">' + m + "</a>"; }
+      );
+    }
+
+    function appendMsg(role, text) {
+      var div = document.createElement("div");
+      div.className = "msg " + role;
+      div.innerHTML = autolink(text);
+      scrollEl.appendChild(div);
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+      return div;
+    }
+
+    function appendToolLine(text) {
+      var div = document.createElement("div");
+      div.className = "msg tool";
+      div.textContent = "› " + text;
+      scrollEl.appendChild(div);
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+
+    function startBotMsg() {
+      pendingBotMsg = appendMsg("bot thinking", "");
+      pendingBuf = "";
+      var cur = document.createElement("span");
+      cur.className = "cursor";
+      pendingBotMsg.appendChild(cur);
+    }
+
+    function appendBotDelta(delta) {
+      if (!pendingBotMsg) startBotMsg();
+      pendingBotMsg.classList.remove("thinking");
+      pendingBuf += delta;
+      pendingBotMsg.innerHTML = autolink(pendingBuf);
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
+
+    function finishBotMsg() {
+      if (!pendingBotMsg) return;
+      if (!pendingBuf) {
+        pendingBotMsg.remove();
+      }
+      pendingBotMsg = null;
+      pendingBuf = "";
+    }
+
+    function connectWs() {
+      var proto = location.protocol === "https:" ? "wss:" : "ws:";
+      var url = proto + "//" + location.host + "/liff/ws";
+      ws = new WebSocket(url);
+      setStatus("connecting");
+      ws.onopen = function () {
+        setStatus("live");
+        ws.send(JSON.stringify({
+          type: "auth",
+          id_token: idToken || null,
+          user_id: profile ? profile.userId : null,
+          display_name: profile ? profile.displayName : null,
+        }));
+      };
+      ws.onclose = function () {
+        setStatus("error");
+        ws = null;
+        // Auto-reconnect after a short delay if the page is still
+        // visible. LINE's in-app browser keeps the WS alive while
+        // the WebView is foregrounded; backgrounding drops it.
+        setTimeout(function () {
+          if (document.visibilityState === "visible") connectWs();
+        }, 1500);
+      };
+      ws.onerror = function () { setStatus("error"); };
+      ws.onmessage = function (ev) {
+        var msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        switch (msg.type) {
+          case "user_echo":
+            // Server-confirmed echo (optional). Skip — local append already shown.
+            break;
+          case "delta":
+            appendBotDelta(msg.text || "");
+            break;
+          case "tool":
+            appendToolLine(msg.tool_name || "(tool)");
+            break;
+          case "error":
+            finishBotMsg();
+            appendMsg("err", msg.text || "error");
+            break;
+          case "done":
+            finishBotMsg();
+            sendEl.disabled = false;
+            inputEl.disabled = false;
+            inputEl.focus();
+            break;
+          case "denied":
+            setStatus("error");
+            appendMsg("err", msg.reason || "Not authorised. Add your LINE user id to the allowlist in thClaws → Line Connect → Allowed user IDs.");
+            sendEl.disabled = true;
+            inputEl.disabled = true;
+            break;
+          case "auth_ok":
+            // server confirmed allowlist
+            break;
+        }
+      };
+    }
+
+    function sendPrompt(text) {
+      if (!ws || ws.readyState !== 1) return;
+      ws.send(JSON.stringify({ type: "prompt", text: text }));
+      appendMsg("user", text);
+      sendEl.disabled = true;
+      inputEl.disabled = true;
+      startBotMsg();
+    }
+
+    formEl.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var t = inputEl.value.trim();
+      if (!t) return;
+      inputEl.value = "";
+      autoResize();
+      sendPrompt(t);
+    });
+
+    function autoResize() {
+      inputEl.style.height = "auto";
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+    }
+    inputEl.addEventListener("input", autoResize);
+
+    inputEl.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        formEl.requestSubmit();
+      }
+    });
+
+    async function boot() {
+      // If LIFF_ID is set AND the LIFF SDK loaded AND we're inside
+      // LINE's WebView, initialise and grab profile + id_token. Else
+      // run anonymous (useful for direct browser smoke testing on
+      // the same Tailscale tunnel).
+      var hasSdk = typeof window.liff !== "undefined";
+      if (LIFF_ID && hasSdk) {
+        try {
+          await liff.init({ liffId: LIFF_ID });
+          if (!liff.isLoggedIn()) {
+            liff.login();
+            return;
+          }
+          profile = await liff.getProfile();
+          idToken = liff.getIDToken();
+          whoEl.textContent = "@" + (profile.displayName || profile.userId);
+        } catch (e) {
+          appendMsg("err", "LIFF init failed: " + (e && e.message ? e.message : e));
+        }
+      } else {
+        whoEl.textContent = "anonymous (no LIFF)";
+      }
+      connectWs();
+    }
+
+    boot();
+  })();
+  </script>
+</body>
+</html>

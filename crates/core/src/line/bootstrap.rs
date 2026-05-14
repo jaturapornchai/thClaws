@@ -141,10 +141,11 @@ impl LineStatus {
 pub async fn spawn(
     config: LineConfig,
     input_tx: mpsc::Sender<crate::shared_session::ShellInput>,
+    events_tx: tokio::sync::broadcast::Sender<crate::shared_session::ViewEvent>,
 ) -> Result<LineSessionHandle, String> {
     match config.mode {
         LineMode::Hosted => Ok(spawn_hosted(config, input_tx)),
-        LineMode::SelfHosted => spawn_self_hosted(config, input_tx).await,
+        LineMode::SelfHosted => spawn_self_hosted(config, input_tx, events_tx).await,
     }
 }
 
@@ -188,6 +189,7 @@ fn spawn_hosted(
 async fn spawn_self_hosted(
     config: LineConfig,
     input_tx: mpsc::Sender<crate::shared_session::ShellInput>,
+    events_tx: tokio::sync::broadcast::Sender<crate::shared_session::ViewEvent>,
 ) -> Result<LineSessionHandle, String> {
     // Take the on-disk DirectConfig if the GUI populated one,
     // otherwise fall back to env-only configuration. The two paths
@@ -237,7 +239,7 @@ async fn spawn_self_hosted(
     ));
     let real_sink: Arc<dyn super::direct::server::DirectEventSink> = Arc::new(
         DirectSink::new(
-            input_tx,
+            input_tx.clone(),
             client.clone(),
             reply_store.clone(),
             slow_cache.clone(),
@@ -245,6 +247,22 @@ async fn spawn_self_hosted(
         )
         .with_approver(approver.clone()),
     );
+    // Optional LIFF bridge. Only enabled when a LIFF id is configured —
+    // otherwise the WS surface stays unregistered. Allowlist is shared
+    // with the webhook gate so the same user IDs auth both surfaces.
+    let liff_bridge = direct_config.liff_id.as_ref().map(|id| {
+        Arc::new(super::direct::liff::LiffBridge {
+            input_tx: input_tx.clone(),
+            events_tx: events_tx.clone(),
+            allowlist: Arc::new(super::direct::allowlist::Allowlist::from_csv(
+                &direct_config.allowed_users_csv,
+                &direct_config.allowed_groups_csv,
+                &direct_config.allowed_rooms_csv,
+            )),
+            liff_id: Some(id.clone()),
+        })
+    });
+
     let direct_handle = super::direct::spawn::spawn_with_stores(
         direct_config.clone(),
         real_sink,
@@ -252,6 +270,7 @@ async fn spawn_self_hosted(
         reply_store.clone(),
         slow_cache.clone(),
         dedup.clone(),
+        liff_bridge,
     )
     .await
     .map_err(|e| format!("self_hosted spawn: {e}"))?;

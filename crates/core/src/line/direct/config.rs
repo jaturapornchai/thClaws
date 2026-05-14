@@ -31,6 +31,12 @@ pub struct DirectConfig {
     pub allowed_groups_csv: String,
     #[serde(default)]
     pub allowed_rooms_csv: String,
+    /// LIFF app ID for the in-LINE WebView chat surface. Empty
+    /// disables the LIFF endpoint. Set via LINE Developers Console
+    /// → LIFF → "Add LIFF app" → endpoint URL pointing at
+    /// `<public_url>/liff`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liff_id: Option<String>,
 }
 
 fn default_host() -> String {
@@ -53,6 +59,7 @@ impl Default for DirectConfig {
             allowed_users_csv: String::new(),
             allowed_groups_csv: String::new(),
             allowed_rooms_csv: String::new(),
+            liff_id: None,
         }
     }
 }
@@ -82,6 +89,7 @@ impl DirectConfig {
             allowed_users_csv: std::env::var("LINE_ALLOWED_USERS").unwrap_or_default(),
             allowed_groups_csv: std::env::var("LINE_ALLOWED_GROUPS").unwrap_or_default(),
             allowed_rooms_csv: std::env::var("LINE_ALLOWED_ROOMS").unwrap_or_default(),
+            liff_id: env("THCLAWS_LINE_LIFF_ID", "LINE_LIFF_ID"),
         }
     }
 

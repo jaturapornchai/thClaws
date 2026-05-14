@@ -855,6 +855,10 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 allowed_users_csv: pick_str("allowed_users"),
                 allowed_groups_csv: pick_str("allowed_groups"),
                 allowed_rooms_csv: pick_str("allowed_rooms"),
+                liff_id: {
+                    let id = pick_str("liff_id");
+                    if id.is_empty() { None } else { Some(id) }
+                },
             };
             let auto_approve_all = msg
                 .get("auto_approve_all")
@@ -1089,6 +1093,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                         "allowed_groups": direct.map(|d| d.allowed_groups_csv.clone()).unwrap_or_default(),
                         "allowed_rooms": direct.map(|d| d.allowed_rooms_csv.clone()).unwrap_or_default(),
                         "slow_response_threshold_secs": direct.map(|d| d.slow_response_threshold_secs).unwrap_or(45),
+                        "liff_id": direct.and_then(|d| d.liff_id.clone()),
                     })
                 }
                 Ok(None) => serde_json::json!({

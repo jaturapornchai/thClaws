@@ -70,13 +70,21 @@ pub struct DirectServerState {
     pub reply_store: Arc<ReplyTokenStore>,
     pub slow_cache: Arc<SlowResponseCache>,
     pub sink: Arc<dyn DirectEventSink>,
+    /// Optional LIFF (LINE Front-end Framework) bridge. When `Some`,
+    /// the router merges in `GET /liff*` + `WS /liff/ws` so an in-LINE
+    /// WebView can chat with the agent. `None` leaves the surface off.
+    pub liff: Option<Arc<super::liff::LiffBridge>>,
 }
 
 pub fn router(state: Arc<DirectServerState>) -> Router {
-    Router::new()
+    let mut app = Router::new()
         .route(WEBHOOK_PATH, post(handle_webhook))
         .route("/line/health", get(handle_health))
-        .with_state(state)
+        .with_state(state.clone());
+    if let Some(bridge) = state.liff.as_ref() {
+        app = app.merge(super::liff::router(bridge.clone()));
+    }
+    app
 }
 
 async fn handle_health() -> &'static str {
@@ -230,6 +238,7 @@ mod tests {
             reply_store: Arc::new(ReplyTokenStore::new()),
             slow_cache: Arc::new(SlowResponseCache::new()),
             sink,
+            liff: None,
         });
         router(state)
     }

@@ -43,6 +43,7 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
   const [allowedRooms, setAllowedRooms] = useState("");
   const [threshold, setThreshold] = useState("45");
   const [autoApproveAll, setAutoApproveAll] = useState(false);
+  const [liffId, setLiffId] = useState("");
   // Masked previews of the saved keychain secrets so the user can
   // see what's persisted and click Save & Connect without re-
   // pasting. Empty string when nothing is saved.
@@ -108,6 +109,7 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
           if (typeof msg.auto_approve_all === "boolean") {
             setAutoApproveAll(msg.auto_approve_all as boolean);
           }
+          if (typeof msg.liff_id === "string") setLiffId(msg.liff_id as string);
           if (msg.mode === "self_hosted" || msg.mode === "hosted") {
             setMode(msg.mode as Mode);
           }
@@ -167,6 +169,7 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
       allowed_rooms: allowedRooms.trim(),
       slow_response_threshold_secs: parseInt(threshold, 10) || 45,
       auto_approve_all: autoApproveAll,
+      liff_id: liffId.trim(),
     });
   };
 
@@ -260,6 +263,8 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
                   setThreshold={setThreshold}
                   autoApproveAll={autoApproveAll}
                   setAutoApproveAll={setAutoApproveAll}
+                  liffId={liffId}
+                  setLiffId={setLiffId}
                   savedAccessPreview={savedAccessPreview}
                   savedSecretPreview={savedSecretPreview}
                   webhookHint={webhookHint}
@@ -387,6 +392,8 @@ function SelfHostedForm({
   setThreshold,
   autoApproveAll,
   setAutoApproveAll,
+  liffId,
+  setLiffId,
   savedAccessPreview,
   savedSecretPreview,
   webhookHint,
@@ -414,6 +421,8 @@ function SelfHostedForm({
   setThreshold: (s: string) => void;
   autoApproveAll: boolean;
   setAutoApproveAll: (v: boolean) => void;
+  liffId: string;
+  setLiffId: (s: string) => void;
   savedAccessPreview: string | null;
   savedSecretPreview: string | null;
   webhookHint: string;
@@ -548,6 +557,25 @@ function SelfHostedForm({
           className="w-full px-3 py-2 rounded font-mono text-xs"
           style={inputStyle}
         />
+      </Field>
+      <Field label="LIFF ID (optional — enables in-LINE chat WebView)">
+        <input
+          type="text"
+          value={liffId}
+          onChange={(e) => setLiffId(e.target.value)}
+          placeholder="1234567890-abcXYZ"
+          className="w-full px-3 py-2 rounded font-mono text-xs"
+          style={inputStyle}
+          autoComplete="off"
+        />
+        <p
+          className="text-[10px] mt-1"
+          style={{ color: "var(--text-secondary)" }}
+        >
+          Get this from LINE Developers Console → LIFF tab → Add. Set the
+          endpoint URL to <code>{webhookHint.replace("/line/webhook", "/liff")}</code>.
+          Leave blank to disable the WebView chat.
+        </p>
       </Field>
 
       <label className="flex items-start gap-2 cursor-pointer">

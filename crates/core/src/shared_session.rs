@@ -1870,7 +1870,9 @@ async fn run_worker(
                 let pair_picture_url = line_cfg.picture_url.clone();
                 let line_auto_approve = line_cfg.auto_approve_all;
                 let handle = match crate::line::bootstrap::spawn(
-                    line_cfg, input_tx_self.clone(),
+                    line_cfg,
+                    input_tx_self.clone(),
+                    events_tx.clone(),
                 )
                 .await
                 {
