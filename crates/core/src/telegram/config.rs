@@ -46,6 +46,17 @@ pub struct TelegramConfig {
     /// engaging. Mirrors OpenClaw's `requireMention`. DMs ignore this.
     #[serde(default)]
     pub require_mention_in_groups: bool,
+    /// Explicit opt-in for the dev / single-owner "anyone can DM"
+    /// posture. When `true` AND both allowlists are empty, the
+    /// bridge forwards every update. Default `false` → empty
+    /// allowlists deny all (P1 fail-closed).
+    #[serde(default)]
+    pub allow_open_mode: bool,
+    /// Explicit opt-in: in groups, sender doesn't have to be on the
+    /// user allowlist (chat-only gating). Default `false` → group
+    /// auth requires BOTH chat_id AND sender user_id (P4 fail-closed).
+    #[serde(default)]
+    pub allow_any_user_in_group: bool,
 }
 
 fn default_long_poll_timeout() -> u64 {
@@ -69,6 +80,8 @@ impl Default for TelegramConfig {
             allowed_users_csv: String::new(),
             allowed_chats_csv: String::new(),
             require_mention_in_groups: true,
+            allow_open_mode: false,
+            allow_any_user_in_group: false,
         }
     }
 }
@@ -108,6 +121,12 @@ impl TelegramConfig {
             require_mention_in_groups: std::env::var("TELEGRAM_REQUIRE_MENTION_IN_GROUPS")
                 .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(true),
+            allow_open_mode: std::env::var("TELEGRAM_ALLOW_OPEN_MODE")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
+            allow_any_user_in_group: std::env::var("TELEGRAM_ALLOW_ANY_USER_IN_GROUP")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
         }
     }
 
@@ -118,6 +137,59 @@ impl TelegramConfig {
                 "http://{}:{}{}",
                 self.webhook_host, self.webhook_port, WEBHOOK_PATH
             ),
+        }
+    }
+
+    /// Canonical on-disk path. None only on truly headless setups
+    /// where no home dir is resolvable.
+    pub fn path() -> Option<std::path::PathBuf> {
+        crate::util::home_dir()
+            .map(|h| h.join(".config").join("thclaws").join("telegram.json"))
+    }
+
+    /// Load saved (non-secret) config. Returns `Ok(None)` when the
+    /// file is absent. Secrets live only in keychain / env and are
+    /// never written here (P7 constraint).
+    pub fn load() -> std::io::Result<Option<Self>> {
+        let Some(path) = Self::path() else {
+            return Ok(None);
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(body) => match serde_json::from_str::<Self>(&body) {
+                Ok(cfg) => Ok(Some(cfg)),
+                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Persist atomically (write-then-rename). Skips writing if no
+    /// home dir is resolvable (silent no-op for CI / sandbox builds).
+    pub fn save(&self) -> std::io::Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_string_pretty(self).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, body)?;
+        std::fs::rename(&tmp, &path)
+    }
+
+    /// Idempotent — missing file = success.
+    pub fn delete() -> std::io::Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
         }
     }
 }

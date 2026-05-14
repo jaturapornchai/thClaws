@@ -5,13 +5,14 @@
 //! Mention gating (groups):
 //!   - `requireMention=true` (default): drop unless the message
 //!     `@mention`s the bot OR is a direct reply to a bot message.
+//!     If `getMe`/`bot_username` is unknown, FAIL CLOSED — drop
+//!     the message (P5). The operator who needs mention-required
+//!     groups to work after a `getMe` outage can either flip
+//!     `require_mention_in_groups=false` or wait for the cached
+//!     username to come back.
 //!   - `requireMention=false`: forward every allowed group message.
 //!
-//! Bot username is needed to detect mentions reliably (Telegram's
-//! `mention` entity covers the literal `@username` substring). When
-//! unknown, we conservatively forward everything that survived the
-//! allowlist — losing a few false-positives is preferable to dropping
-//! every group message because we didn't fetch `getMe` yet.
+//! DMs are unaffected by mention gating.
 
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -137,8 +138,10 @@ fn is_mentioned(
     entities: &[MessageEntity],
     username: Option<&str>,
 ) -> bool {
+    // P5 fail-closed: unknown bot username → can't verify a mention;
+    // treat as "not mentioned" so the caller drops the message.
     let Some(u) = username else {
-        return true;
+        return false;
     };
     let needle = format!("@{u}");
     for e in entities {
@@ -164,11 +167,12 @@ fn replied_to_bot(msg: &Message, bot_username: Option<&str>) -> bool {
     if !from.is_bot {
         return false;
     }
+    // P5 fail-closed: without our cached @username we can't be sure
+    // this reply is to OUR bot vs. another bot in the same group.
+    // Drop unless both sides have a username that matches.
     match (from.username.as_deref(), bot_username) {
         (Some(u), Some(bu)) => u.eq_ignore_ascii_case(bu),
-        // No bot username known — any bot reply counts. Acceptable —
-        // group has other bots? `requireMention` config can be off.
-        _ => true,
+        _ => false,
     }
 }
 
@@ -224,10 +228,60 @@ mod tests {
     }
 
     #[test]
-    fn unknown_username_treated_as_mentioned() {
+    fn unknown_username_fails_closed_p5() {
+        // P5: when we can't resolve the bot's @username, we cannot
+        // reliably verify a mention → treat as NOT mentioned so the
+        // group gate drops the message. DMs are unaffected because
+        // the caller only consults is_mentioned for groups.
         let text = "hello there";
         let ents = vec![];
-        assert!(is_mentioned(text, &ents, None));
+        assert!(!is_mentioned(text, &ents, None));
+    }
+
+    #[test]
+    fn reply_to_unknown_bot_username_fails_closed_p5() {
+        let bot = User {
+            id: 1,
+            is_bot: true,
+            username: None,
+            first_name: None,
+        };
+        let parent = Message {
+            message_id: 100,
+            from: Some(bot),
+            chat: Chat {
+                id: -1,
+                typ: "supergroup".into(),
+                username: None,
+                title: None,
+            },
+            text: Some("hi".into()),
+            reply_to_message: None,
+            entities: vec![],
+        };
+        let reply = Message {
+            message_id: 101,
+            from: Some(User {
+                id: 42,
+                is_bot: false,
+                username: None,
+                first_name: None,
+            }),
+            chat: Chat {
+                id: -1,
+                typ: "supergroup".into(),
+                username: None,
+                title: None,
+            },
+            text: Some("thanks".into()),
+            reply_to_message: Some(Box::new(parent)),
+            entities: vec![],
+        };
+        // No usernames at all → fail closed.
+        assert!(!replied_to_bot(&reply, None));
+        // Our cached name set, but the bot they replied to has no
+        // username field — still ambiguous, deny.
+        assert!(!replied_to_bot(&reply, Some("thclawsbot")));
     }
 
     #[test]

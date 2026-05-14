@@ -41,6 +41,8 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
   const [allowedUsers, setAllowedUsers] = useState("");
   const [allowedChats, setAllowedChats] = useState("");
   const [requireMention, setRequireMention] = useState(true);
+  const [allowOpenMode, setAllowOpenMode] = useState(false);
+  const [allowAnyUserInGroup, setAllowAnyUserInGroup] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   /// Token preview shown next to the bot-token input when a token is
   /// already saved in the OS keychain. User can type a new token to
@@ -125,6 +127,8 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
       allowed_users: allowedUsers.trim(),
       allowed_chats: allowedChats.trim(),
       require_mention_in_groups: requireMention,
+      allow_open_mode: allowOpenMode,
+      allow_any_user_in_group: allowAnyUserInGroup,
     });
   };
 
@@ -261,9 +265,12 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
             />
           </label>
 
-          {/* Advanced — collapsed by default. Default (collapsed) =
-              long-poll mode, empty allowlist (open mode — forward all
-              DMs to this bot), require @mention in groups = true. */}
+          {/* Advanced — collapsed by default. Default posture is
+              FAIL-CLOSED: empty allowlist denies every update; group
+              auth requires BOTH chat_id and sender user_id; mention
+              gating in groups drops on getMe failure. The flags
+              below are explicit opt-ins for the dev / single-owner
+              postures that lose those guards. */}
           <button
             type="button"
             onClick={() => setShowAdvanced((v) => !v)}
@@ -274,7 +281,7 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
             Advanced{" "}
             {!showAdvanced && (
               <span style={{ color: "var(--text-secondary)", opacity: 0.7 }}>
-                · long-poll · allowlist empty (open)
+                · long-poll · fail-closed allowlist
               </span>
             )}
           </button>
@@ -284,16 +291,17 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
               <div
                 className="flex items-start gap-2 p-2 rounded text-xs"
                 style={{
-                  background: "rgba(209,154,102,0.12)",
-                  color: "var(--warning, #d19a66)",
+                  background: "rgba(80,200,120,0.10)",
+                  color: "var(--text-primary)",
                 }}
               >
-                <AlertCircle size={12} className="mt-0.5 shrink-0" />
+                <Info size={12} className="mt-0.5 shrink-0" />
                 <span>
-                  Empty allowlist = <strong>open mode</strong> — any Telegram
-                  user who discovers <code>@{status.bot_username ?? "bot"}</code>{" "}
-                  can DM and drive thClaws. Keep the bot username private, or
-                  add numeric user IDs to lock down.
+                  Default = fail-closed. Empty allowlist denies every
+                  inbound update; groups require both the chat_id AND
+                  the sender's numeric Telegram user ID; group mention
+                  gating drops if <code>getMe</code> fails. Toggle the
+                  flags below only when you accept the trade-offs.
                 </span>
               </div>
 
@@ -441,6 +449,34 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
             <span className="text-xs">
               Require <code>@mention</code> or direct reply in groups
               (matches Telegram&apos;s default privacy mode)
+            </span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowOpenMode}
+              onChange={(e) => setAllowOpenMode(e.target.checked)}
+            />
+            <span className="text-xs">
+              <strong style={{ color: "var(--warning, #d19a66)" }}>
+                Allow open mode
+              </strong>{" "}
+              — empty allowlist forwards every DM. Use only for
+              single-owner bots whose username is kept private.
+            </span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowAnyUserInGroup}
+              onChange={(e) => setAllowAnyUserInGroup(e.target.checked)}
+            />
+            <span className="text-xs">
+              Allow any user in allow-listed groups (skip sender
+              user_id check inside groups — chat membership is the
+              only gate)
             </span>
           </label>
             </>

@@ -956,6 +956,27 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 }
             }
 
+            let allowed_users = pick_str("allowed_users");
+            let allowed_chats = pick_str("allowed_chats");
+            let allow_open_mode = pick_bool("allow_open_mode", false);
+            let allow_any_user_in_group = pick_bool("allow_any_user_in_group", false);
+
+            // P1 fail-closed guard: empty allowlist without an
+            // explicit open-mode opt-in is rejected at setup so the
+            // GUI surfaces the configuration mistake immediately.
+            if allowed_users.trim().is_empty()
+                && allowed_chats.trim().is_empty()
+                && !allow_open_mode
+            {
+                let payload = serde_json::json!({
+                    "type": "telegram_setup_result",
+                    "ok": false,
+                    "error": "Empty allowlist denies all updates. Add numeric Telegram user IDs (and/or group chat IDs), or tick \"Allow open mode\" in Advanced to accept any sender.",
+                });
+                (ctx.dispatch)(payload.to_string());
+                return true;
+            }
+
             let cfg = crate::telegram::TelegramConfig {
                 mode,
                 long_poll_timeout_secs: pick_u64("long_poll_timeout_secs", 30),
@@ -968,10 +989,19 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     let u = pick_str("webhook_public_url");
                     if u.is_empty() { None } else { Some(u) }
                 },
-                allowed_users_csv: pick_str("allowed_users"),
-                allowed_chats_csv: pick_str("allowed_chats"),
+                allowed_users_csv: allowed_users,
+                allowed_chats_csv: allowed_chats,
                 require_mention_in_groups: pick_bool("require_mention_in_groups", true),
+                allow_open_mode,
+                allow_any_user_in_group,
             };
+
+            // P7: persist non-secret settings so the next worker boot
+            // auto-reconnects with the same posture. Secrets stay
+            // in the OS keychain only.
+            if let Err(e) = cfg.save() {
+                eprintln!("[telegram] config save failed: {e}");
+            }
 
             let _ = ctx
                 .shared
@@ -1146,6 +1176,12 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
         }
 
         "telegram_disconnect" => {
+            // P7: drop persisted config so the next worker boot
+            // doesn't auto-reconnect. Keychain entries are kept so
+            // re-connect via the GUI doesn't require re-pasting.
+            if let Err(e) = crate::telegram::TelegramConfig::delete() {
+                eprintln!("[telegram] config delete failed: {e}");
+            }
             let _ = ctx
                 .shared
                 .input_tx

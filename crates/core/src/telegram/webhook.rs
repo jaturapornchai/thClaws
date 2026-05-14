@@ -27,6 +27,7 @@ use axum::{
 
 use super::allowlist::Allowlist;
 use super::config::WEBHOOK_PATH;
+use super::dedup::DedupStore;
 use super::dispatch;
 use super::long_poll::TelegramUpdateSink;
 use super::types::Update;
@@ -34,6 +35,7 @@ use super::types::Update;
 pub struct WebhookState {
     pub secret_token: String,
     pub allowlist: Arc<Allowlist>,
+    pub dedup: Arc<DedupStore>,
     pub sink: Arc<dyn TelegramUpdateSink>,
 }
 
@@ -64,7 +66,7 @@ async fn handle_webhook(
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, "bad body").into_response(),
     };
-    dispatch::route_update(&state.allowlist, state.sink.clone(), update).await;
+    dispatch::route_update(&state.allowlist, &state.dedup, state.sink.clone(), update).await;
     (StatusCode::OK, "").into_response()
 }
 
@@ -102,6 +104,7 @@ mod tests {
         let state = Arc::new(WebhookState {
             secret_token: secret.into(),
             allowlist: Arc::new(Allowlist::from_csv(allow_users, "")),
+            dedup: Arc::new(DedupStore::new()),
             sink,
         });
         router(state)

@@ -13,14 +13,22 @@
 use std::sync::Arc;
 
 use super::allowlist::Allowlist;
+use super::dedup::DedupStore;
 use super::long_poll::TelegramUpdateSink;
 use super::types::Update;
 
 pub async fn route_update(
     allowlist: &Allowlist,
+    dedup: &DedupStore,
     sink: Arc<dyn TelegramUpdateSink>,
     update: Update,
 ) {
+    // P3 idempotency: drop a duplicate update_id before we burn an
+    // agent turn or fire a callback. Webhook retries + long-poll
+    // offset rewinds both land here.
+    if !dedup.check_and_record(update.update_id) {
+        return;
+    }
     if let Some(msg) = update.message.as_ref().or(update.channel_post.as_ref()) {
         let from_id = match &msg.from {
             Some(u) => u.id,
@@ -32,7 +40,7 @@ pub async fn route_update(
     } else if let Some(cb) = update.callback_query.as_ref() {
         // Callback gate: sender must appear in the user allowlist
         // (regardless of chat scope — buttons are user-targeted).
-        // Open mode (both lists empty) → forward all callbacks too.
+        // Explicit open-mode opt-in forwards all callbacks too.
         if !allowlist.is_open() && !allowlist.users.contains(&cb.from.id) {
             return;
         }
@@ -87,7 +95,7 @@ mod tests {
     async fn allowed_dm_dispatched() {
         let sink = Arc::new(Cap::default());
         let al = Allowlist::from_csv("42", "");
-        route_update(&al, sink.clone(), msg_update(1, 42, 42, "private")).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(1, 42, 42, "private")).await;
         assert_eq!(sink.seen.lock().unwrap().clone(), vec![1]);
     }
 
@@ -95,15 +103,36 @@ mod tests {
     async fn blocked_dm_dropped() {
         let sink = Arc::new(Cap::default());
         let al = Allowlist::from_csv("42", "");
-        route_update(&al, sink.clone(), msg_update(2, 99, 99, "private")).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(2, 99, 99, "private")).await;
         assert!(sink.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn group_allowed_when_chat_listed() {
+    async fn group_allowed_when_both_chat_and_user_listed() {
+        // P4 (fail-closed group auth): chat allow-listed AND sender
+        // allow-listed → dispatched.
+        let sink = Arc::new(Cap::default());
+        let al = Allowlist::from_csv("42", "-100123");
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(3, 42, -100123, "supergroup")).await;
+        assert_eq!(sink.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn group_denied_when_chat_listed_but_user_not_listed() {
+        // P4 fail-closed: chat is in chats, sender is NOT in users
+        // → drop. Previous behaviour forwarded; that was the bug.
         let sink = Arc::new(Cap::default());
         let al = Allowlist::from_csv("", "-100123");
-        route_update(&al, sink.clone(), msg_update(3, 42, -100123, "supergroup")).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(3, 42, -100123, "supergroup")).await;
+        assert!(sink.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_chat_only_mode_skips_user_check_when_flag_set() {
+        let sink = Arc::new(Cap::default());
+        let al =
+            Allowlist::from_csv("", "-100123").with_any_user_in_group(true);
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(31, 42, -100123, "supergroup")).await;
         assert_eq!(sink.seen.lock().unwrap().len(), 1);
     }
 
@@ -111,7 +140,7 @@ mod tests {
     async fn group_blocked_when_chat_missing() {
         let sink = Arc::new(Cap::default());
         let al = Allowlist::from_csv("", "-100999");
-        route_update(&al, sink.clone(), msg_update(4, 42, -100123, "supergroup")).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(4, 42, -100123, "supergroup")).await;
         assert!(sink.seen.lock().unwrap().is_empty());
     }
 
@@ -121,7 +150,7 @@ mod tests {
         let al = Allowlist::from_csv("42", "");
         let mut u = msg_update(5, 42, 42, "private");
         u.message.as_mut().unwrap().from = None;
-        route_update(&al, sink.clone(), u).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), u).await;
         assert!(sink.seen.lock().unwrap().is_empty());
     }
 
@@ -145,7 +174,7 @@ mod tests {
                 message: None,
             }),
         };
-        route_update(&al, sink.clone(), u).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), u).await;
         assert_eq!(sink.seen.lock().unwrap().len(), 1);
     }
 
@@ -169,23 +198,34 @@ mod tests {
                 message: None,
             }),
         };
-        route_update(&al, sink.clone(), u).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), u).await;
         assert!(sink.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn open_mode_forwards_any_dm() {
+    async fn empty_allowlist_default_drops_p1_fail_closed() {
+        // P1: a freshly-constructed (or empty-form-submission)
+        // allowlist must deny every update. Open mode is opt-in.
         let sink = Arc::new(Cap::default());
-        let al = Allowlist::default(); // empty = open mode
-        route_update(&al, sink.clone(), msg_update(10, 99, 99, "private")).await;
-        route_update(&al, sink.clone(), msg_update(11, 100, -1234, "supergroup")).await;
+        let al = Allowlist::default();
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(20, 99, 99, "private")).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(21, 100, -1234, "supergroup")).await;
+        assert!(sink.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_mode_forwards_any_dm_when_explicit() {
+        let sink = Arc::new(Cap::default());
+        let al = Allowlist::default().with_open_mode(true);
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(10, 99, 99, "private")).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), msg_update(11, 100, -1234, "supergroup")).await;
         assert_eq!(sink.seen.lock().unwrap().clone(), vec![10, 11]);
     }
 
     #[tokio::test]
-    async fn open_mode_forwards_any_callback() {
+    async fn open_mode_forwards_any_callback_when_explicit() {
         let sink = Arc::new(Cap::default());
-        let al = Allowlist::default(); // empty = open mode
+        let al = Allowlist::default().with_open_mode(true);
         let u = Update {
             update_id: 12,
             message: None,
@@ -202,7 +242,42 @@ mod tests {
                 message: None,
             }),
         };
-        route_update(&al, sink.clone(), u).await;
+        route_update(&al, &DedupStore::new(), sink.clone(), u).await;
         assert_eq!(sink.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_update_id_dispatched_once_p3() {
+        let sink = Arc::new(Cap::default());
+        let al = Allowlist::from_csv("42", "");
+        let dedup = DedupStore::new();
+        // Same update_id arrives twice (webhook retry).
+        route_update(&al, &dedup, sink.clone(), msg_update(99, 42, 42, "private")).await;
+        route_update(&al, &dedup, sink.clone(), msg_update(99, 42, 42, "private")).await;
+        assert_eq!(sink.seen.lock().unwrap().clone(), vec![99]);
+    }
+
+    #[tokio::test]
+    async fn empty_allowlist_default_drops_callbacks_p1_fail_closed() {
+        let sink = Arc::new(Cap::default());
+        let al = Allowlist::default();
+        let u = Update {
+            update_id: 22,
+            message: None,
+            channel_post: None,
+            callback_query: Some(CallbackQuery {
+                id: "cb-x".into(),
+                from: User {
+                    id: 1,
+                    is_bot: false,
+                    username: None,
+                    first_name: None,
+                },
+                data: Some("tool:allow:x".into()),
+                message: None,
+            }),
+        };
+        route_update(&al, &DedupStore::new(), sink.clone(), u).await;
+        assert!(sink.seen.lock().unwrap().is_empty());
     }
 }

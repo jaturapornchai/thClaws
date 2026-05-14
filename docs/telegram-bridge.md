@@ -73,6 +73,24 @@ Module map (Rust):
 | [`telegram/approver.rs`](../crates/core/src/telegram/approver.rs)     | `TelegramApprover` (inline-keyboard approvals)             |
 | [`telegram/spawn.rs`](../crates/core/src/telegram/spawn.rs)           | Orchestrate transport + secrets + `getMe`                  |
 
+## Security defaults (fail-closed)
+
+The Telegram bridge runs **fail-closed** by default. An operator who
+accepts the trade-offs can opt into the looser postures via explicit
+flags. The defaults that matter:
+
+| Behaviour                        | Default                              | Opt-out flag              |
+| -------------------------------- | ------------------------------------ | ------------------------- |
+| Empty allowlist                  | Deny every update                    | `allow_open_mode = true`  |
+| Group authorisation              | Require BOTH chat_id AND user_id     | `allow_any_user_in_group` |
+| Mention gate on `getMe` failure  | Drop group messages                  | `require_mention_in_groups = false` |
+| Webhook secret_token mismatch    | 401                                   | (n/a — fail closed)       |
+| Duplicate `update_id`            | Drop                                  | (n/a — always dedup)      |
+
+The Connect modal rejects an empty allowlist when `allow_open_mode` is
+unticked, so the GUI cannot silently bring the bridge online with the
+"anyone DMing the bot drives the agent" posture.
+
 ## Prerequisites
 
 - A bot token from [@BotFather](https://t.me/BotFather) (`/newbot`).
@@ -80,7 +98,10 @@ Module map (Rust):
   - DM the bot once after `telegram_setup`, then check `thclaws logs`
     for the `from.id` of the dropped message.
 - For webhook mode: a public HTTPS endpoint reverse-proxied to the bind
-  address (`0.0.0.0:8647` by default).
+  address (`0.0.0.0:8647` by default). thClaws will call `setWebhook`
+  for you when you provide a public URL during setup; otherwise it
+  binds the listener and logs a hint that `setWebhook` must be called
+  manually before Telegram delivers updates.
 
 ## Setup
 
@@ -102,11 +123,15 @@ export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 export TELEGRAM_ALLOWED_USERS=123456789,987654321
 export TELEGRAM_ALLOWED_CHATS=-1001234567890
 export TELEGRAM_REQUIRE_MENTION_IN_GROUPS=1
+# Explicit opt-ins (default = unset = fail-closed):
+export TELEGRAM_ALLOW_OPEN_MODE=0        # 1 = empty allowlist forwards all
+export TELEGRAM_ALLOW_ANY_USER_IN_GROUP=0 # 1 = chat-only gating in groups
 # webhook mode only:
 export TELEGRAM_WEBHOOK=1
 export TELEGRAM_WEBHOOK_SECRET_TOKEN=any_32_char_random_string
 export TELEGRAM_WEBHOOK_HOST=0.0.0.0
 export TELEGRAM_WEBHOOK_PORT=8647
+export TELEGRAM_WEBHOOK_URL=https://tg.example.com  # auto-setWebhook on Connect
 ```
 
 `TelegramConfig::from_env()` is consumed by the GUI/IPC layer; CLI users
@@ -114,8 +139,14 @@ can read it directly from the same env vars.
 
 ### Webhook registration
 
-thClaws does **not** call `setWebhook` for you. Once the bridge is
-listening, register your public URL with Telegram yourself:
+When you provide a public URL during setup (GUI **Webhook public URL**
+field or `TELEGRAM_WEBHOOK_URL` env var), thClaws calls `setWebhook`
+for you on Connect. The bind happens before the call, so a network
+failure to Telegram is logged (token-redacted) and the listener stays
+up — re-Connect to retry.
+
+If you skip the public URL, the listener still binds; you must call
+`setWebhook` yourself before Telegram delivers updates:
 
 ```bash
 curl -sS \
@@ -127,6 +158,20 @@ curl -sS \
 
 To switch back to long-polling later, hit `deleteWebhook` first or
 thClaws's startup `deleteWebhook` (best-effort) will clear it.
+
+### Reliability
+
+- **Update dedup.** Both long-poll and webhook paths share an
+  in-memory bounded LRU keyed on `update_id`. A retry from Telegram
+  after a webhook timeout or a long-poll offset rewind no longer
+  triggers a duplicate agent turn.
+- **Auto-reconnect on restart.** Non-secret settings persist at
+  `~/.config/thclaws/telegram.json`; the worker reloads + reconnects
+  on next launch. Tokens live in the OS keychain only — never in
+  this file.
+- **Token redaction.** Every log line and IPC payload that includes
+  a reqwest error runs through `redact_token` so the bot token can't
+  leak via "URL contained in error message" paths.
 
 ## Group behaviour
 
@@ -148,14 +193,24 @@ The allowlist remains the only authorisation gate at that point.
 
 - **Bot token is god-mode.** Anyone with the token can drive thClaws.
   Keep it in the OS keychain (auto via GUI) or `.env` mode 0600. Never
-  commit it.
-- **Allowlist must be non-empty in production.** Empty user + chat
-  allowlist denies everything — the setup form rejects empty allowlists.
-- **Webhook secret_token** is shared with `setWebhook`. Generate a fresh
-  32+ char random string per deploy.
-- **No Push API analogue ever opens unsolicited chats.** Approvals only
-  land in chats that have messaged the bot first (the approver tracks
-  `last_chat_id` updated by the sink).
+  commit it. Logs and IPC error payloads redact `/bot<TOKEN>/` paths
+  automatically.
+- **Empty allowlist is rejected by default.** Setup will not connect
+  unless either the user/chat allowlists are non-empty OR the explicit
+  **Allow open mode** flag is ticked (treated as opt-in to "anyone who
+  finds the bot username can drive the agent").
+- **Group default = BOTH chat_id AND sender user_id must be listed.**
+  Use the **Allow any user in allow-listed groups** flag to revert
+  to chat-only gating.
+- **Webhook secret_token** is shared with `setWebhook`. Generate a
+  fresh 32+ char random string per deploy. Mismatches return 401 in
+  constant time.
+- **Mention gate fails closed.** If `getMe` doesn't return a
+  `username`, group messages with `requireMention=true` are dropped
+  (we can't verify the mention reliably).
+- **No Push API analogue ever opens unsolicited chats.** Approvals
+  only land in chats that have messaged the bot during the active
+  turn (per-chat routing via `tokio::task_local!`).
 
 ## Limitations
 

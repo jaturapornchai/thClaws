@@ -19,6 +19,7 @@ use std::sync::Arc;
 use super::allowlist::Allowlist;
 use super::client::TelegramClient;
 use super::config::TelegramConfig;
+use super::dedup::DedupStore;
 use super::errors::TelegramError;
 use super::long_poll::{self, TelegramUpdateSink};
 use super::mode::TelegramMode;
@@ -32,12 +33,13 @@ pub struct TelegramHandle {
     pub join: tokio::task::JoinHandle<()>,
     pub client: Arc<TelegramClient>,
     pub allowlist: Arc<Allowlist>,
+    pub dedup: Arc<DedupStore>,
     pub mode: TelegramMode,
     /// Some(addr) only when mode = Webhook. None for long-poll.
     pub bind_addr: Option<SocketAddr>,
     /// Cached lower-case bot username from `getMe` (used by the sink
-    /// for mention detection). None if `getMe` failed; the sink
-    /// degrades to forwarding all allowed group messages.
+    /// for mention detection). None if `getMe` failed; mention-gate
+    /// then fails closed for groups (P5).
     pub bot_username: Option<String>,
 }
 
@@ -97,7 +99,13 @@ async fn fetch_bot_username(client: &TelegramClient) -> Option<String> {
     let resp = match reqwest::Client::new().get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[telegram] getMe network failed: {e}");
+            // P2: sanitise — reqwest's Display impl can include the
+            // full URL (bot token inside) when the error originates
+            // in URL parsing or connection setup.
+            eprintln!(
+                "[telegram] getMe network failed: {}",
+                super::client::redact_token(&e.to_string())
+            );
             return None;
         }
     };
@@ -120,10 +128,12 @@ pub async fn spawn(
     let client = Arc::new(TelegramClient::new(bot_token)?);
     let bot_username = fetch_bot_username(&client).await;
 
-    let allowlist = Arc::new(Allowlist::from_csv(
-        &config.allowed_users_csv,
-        &config.allowed_chats_csv,
-    ));
+    let allowlist = Arc::new(
+        Allowlist::from_csv(&config.allowed_users_csv, &config.allowed_chats_csv)
+            .with_open_mode(config.allow_open_mode)
+            .with_any_user_in_group(config.allow_any_user_in_group),
+    );
+    let dedup = Arc::new(DedupStore::new());
 
     let cancel = CancelToken::new();
     match config.mode {
@@ -138,6 +148,7 @@ pub async fn spawn(
             let cancel_for_loop = cancel.clone();
             let client_for_loop = client.clone();
             let allow_for_loop = allowlist.clone();
+            let dedup_for_loop = dedup.clone();
             let sink_for_loop = sink.clone();
             let timeout_secs = config.long_poll_timeout_secs;
             let join = tokio::spawn(async move {
@@ -145,6 +156,7 @@ pub async fn spawn(
                     client_for_loop,
                     sink_for_loop,
                     allow_for_loop,
+                    dedup_for_loop,
                     timeout_secs,
                     cancel_for_loop,
                 )
@@ -158,6 +170,7 @@ pub async fn spawn(
                 join,
                 client,
                 allowlist,
+                dedup,
                 mode: TelegramMode::LongPoll,
                 bind_addr: None,
                 bot_username,
@@ -165,9 +178,41 @@ pub async fn spawn(
         }
         TelegramMode::Webhook => {
             let secret_token = load_webhook_secret()?;
+            // P6: if the user supplied a public URL, register the
+            // webhook with Telegram automatically so the bot becomes
+            // fully online on Connect. Without auto-registration the
+            // listener binds but no updates arrive until the user
+            // runs `setWebhook` by hand — surprising UX. Best-effort:
+            // a failure here is logged (token-redacted) and the
+            // bridge still comes up so the user can fix DNS / retry.
+            if let Some(public) = config.webhook_public_url.as_deref() {
+                let url = format!(
+                    "{}{}",
+                    public.trim_end_matches('/'),
+                    super::config::WEBHOOK_PATH
+                );
+                let allowed = ["message", "channel_post", "callback_query"];
+                match client
+                    .set_webhook(&url, &secret_token, &allowed)
+                    .await
+                {
+                    Ok(()) => eprintln!(
+                        "[telegram] setWebhook ok url={url}"
+                    ),
+                    Err(e) => eprintln!(
+                        "[telegram] setWebhook failed (continuing): {}",
+                        super::client::redact_token(&e.to_string())
+                    ),
+                }
+            } else {
+                eprintln!(
+                    "[telegram] webhook listener bound but `webhook_public_url` is empty — call setWebhook yourself or paste a public URL in the Connect modal so the bridge can register it for you."
+                );
+            }
             let state = Arc::new(super::webhook::WebhookState {
                 secret_token,
                 allowlist: allowlist.clone(),
+                dedup: dedup.clone(),
                 sink,
             });
             let app = super::webhook::router(state);
@@ -196,6 +241,7 @@ pub async fn spawn(
                 join,
                 client,
                 allowlist,
+                dedup,
                 mode: TelegramMode::Webhook,
                 bind_addr: Some(actual_addr),
                 bot_username,

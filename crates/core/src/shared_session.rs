@@ -1579,6 +1579,17 @@ async fn run_worker(
         Err(e) => eprintln!("[line] failed to load on-disk config: {e}"),
     }
 
+    // P7: same pattern for the Telegram bridge. Non-secret settings
+    // ride on `telegram.json`; the bot token comes from keychain at
+    // spawn time. Absent file = bridge not configured; do nothing.
+    match crate::telegram::TelegramConfig::load() {
+        Ok(Some(cfg)) => {
+            let _ = input_tx_self.send(ShellInput::TelegramConnect(cfg));
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("[telegram] failed to load on-disk config: {e}"),
+    }
+
     // Lead inbox poller — parity with repl.rs:1524. Without this, teammates
     // message the lead, messages pile up in `.thclaws/team/inboxes/lead.json`
     // unread, and the team stalls waiting for the lead to react.
@@ -2450,11 +2461,27 @@ async fn run_worker(
                         continue;
                     }
                 }
+                // Pre-resolve the bot username via `getMe` so the sink
+                // can mention-gate groups correctly. Failure is logged
+                // (token-redacted) and bot_username stays None — with
+                // P5 fail-closed semantics that drops every group
+                // message when `require_mention_in_groups` is on, which
+                // is the safe posture for an unconfirmed bot identity.
+                let bot_username = match client_for_sink.get_me().await {
+                    Ok(body) => body
+                        .get("username")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_lowercase()),
+                    Err(e) => {
+                        eprintln!("[telegram] getMe failed: {e}");
+                        None
+                    }
+                };
                 let sink: std::sync::Arc<dyn crate::telegram::long_poll::TelegramUpdateSink> =
                     std::sync::Arc::new(crate::telegram::sink::TelegramSink {
                         input_tx: input_tx_self.clone(),
                         client: client_for_sink.clone(),
-                        bot_username: None, // populated after spawn returns
+                        bot_username,
                         require_mention_in_groups: tg_cfg.require_mention_in_groups,
                         approver: Some(approver_for_sink.clone()),
                     });

@@ -16,6 +16,7 @@ pub mod approver;
 pub mod chunk;
 pub mod client;
 pub mod config;
+pub mod dedup;
 pub mod dispatch;
 pub mod errors;
 pub mod long_poll;

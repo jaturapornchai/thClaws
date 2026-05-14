@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use super::allowlist::Allowlist;
 use super::client::TelegramClient;
+use super::dedup::DedupStore;
 use super::dispatch;
 use super::errors::TelegramError;
 use super::types::Update;
@@ -26,6 +27,7 @@ pub async fn run(
     client: Arc<TelegramClient>,
     sink: Arc<dyn TelegramUpdateSink>,
     allowlist: Arc<Allowlist>,
+    dedup: Arc<DedupStore>,
     timeout_secs: u64,
     cancel: CancelToken,
 ) -> Result<(), TelegramError> {
@@ -56,7 +58,7 @@ pub async fn run(
         backoff = Duration::from_millis(500);
         for u in updates {
             offset = offset.max(u.update_id + 1);
-            dispatch::route_update(&allowlist, sink.clone(), u).await;
+            dispatch::route_update(&allowlist, &dedup, sink.clone(), u).await;
         }
     }
 }
@@ -83,9 +85,10 @@ mod tests {
             seen: Mutex::new(vec![]),
         });
         let allowlist = Arc::new(Allowlist::default());
+        let dedup = Arc::new(DedupStore::new());
         let cancel = CancelToken::new();
         cancel.cancel();
-        let r = run(client, sink, allowlist, 30, cancel).await;
+        let r = run(client, sink, allowlist, dedup, 30, cancel).await;
         assert!(r.is_ok());
     }
 }

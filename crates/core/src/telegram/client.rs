@@ -12,6 +12,35 @@ use super::types::{ApiResponse, Update};
 
 pub const API_BASE: &str = "https://api.telegram.org";
 
+/// Replace `bot<TOKEN>` segments inside a string with `bot<REDACTED>`.
+/// reqwest's `to_string()` on URL errors leaks the URL path which
+/// contains the bot token; every place we format a reqwest error has
+/// to sanitise before logging or surfacing to the UI (P2).
+pub(crate) fn redact_token(s: &str) -> String {
+    // Telegram bot tokens are `<digits>:<35-char>`; `bot` prefix in the
+    // URL path is the only ambiguous anchor (no other thClaws code
+    // uses `/bot<...>/`). Replace anything between `/bot` and the
+    // next `/` with `<REDACTED>`.
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(idx) = rest.find("/bot") {
+        out.push_str(&rest[..idx]);
+        out.push_str("/bot<REDACTED>");
+        // Advance past `/bot` and skip token chars until the next `/`
+        // or end-of-string.
+        let after = &rest[idx + 4..];
+        match after.find('/') {
+            Some(slash) => rest = &after[slash..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub struct TelegramClient {
     http: reqwest::Client,
     bot_token: String,
@@ -44,7 +73,7 @@ impl TelegramClient {
             .user_agent(concat!("thclaws-core/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(70))
             .build()
-            .map_err(|e| TelegramError::Http(e.to_string()))?;
+            .map_err(|e| TelegramError::Http(redact_token(&e.to_string())))?;
         Ok(Self { http, bot_token })
     }
 
@@ -120,12 +149,12 @@ impl TelegramClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| TelegramError::Http(e.to_string()))?;
+            .map_err(|e| TelegramError::Http(redact_token(&e.to_string())))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| TelegramError::Http(e.to_string()))?;
+            .map_err(|e| TelegramError::Http(redact_token(&e.to_string())))?;
         if !status.is_success() {
             return Err(TelegramError::Api {
                 status: status.as_u16(),
@@ -191,12 +220,12 @@ impl TelegramClient {
             .get(&url)
             .send()
             .await
-            .map_err(|e| TelegramError::Http(e.to_string()))?;
+            .map_err(|e| TelegramError::Http(redact_token(&e.to_string())))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| TelegramError::Http(e.to_string()))?;
+            .map_err(|e| TelegramError::Http(redact_token(&e.to_string())))?;
         if !status.is_success() {
             return Err(TelegramError::Api {
                 status: status.as_u16(),
@@ -227,12 +256,12 @@ impl TelegramClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| TelegramError::Http(e.to_string()))?;
+            .map_err(|e| TelegramError::Http(redact_token(&e.to_string())))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|e| TelegramError::Http(e.to_string()))?;
+            .map_err(|e| TelegramError::Http(redact_token(&e.to_string())))?;
         if !status.is_success() {
             return Err(TelegramError::Api {
                 status: status.as_u16(),
@@ -276,5 +305,36 @@ mod tests {
         // Construct client with bogus token — empty bubbles never hit network.
         let c = TelegramClient::new("123:abc".into()).unwrap();
         assert!(c.send_message(42, "", None).await.is_ok());
+    }
+
+    #[test]
+    fn redact_token_replaces_bot_path_segment() {
+        let raw = "error connecting to https://api.telegram.org/bot123456789:AAH7_secret/getUpdates: timeout";
+        let red = redact_token(raw);
+        assert!(red.contains("/bot<REDACTED>/getUpdates"));
+        assert!(!red.contains("AAH7_secret"));
+        assert!(!red.contains("123456789:AAH7_secret"));
+    }
+
+    #[test]
+    fn redact_token_handles_multiple_occurrences() {
+        let raw = "url1 /bot111:aaa/x url2 /bot222:bbb/y";
+        let red = redact_token(raw);
+        assert!(!red.contains("111:aaa"));
+        assert!(!red.contains("222:bbb"));
+        assert_eq!(red.matches("<REDACTED>").count(), 2);
+    }
+
+    #[test]
+    fn redact_token_passes_through_when_no_bot_segment() {
+        let raw = "plain error message with no url";
+        assert_eq!(redact_token(raw), raw);
+    }
+
+    #[test]
+    fn redact_token_handles_bot_at_end_of_string() {
+        let raw = "trailing /bot999:zzz";
+        let red = redact_token(raw);
+        assert_eq!(red, "trailing /bot<REDACTED>");
     }
 }
