@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { X, Send, CheckCircle2, AlertCircle, Info } from "lucide-react";
+import {
+  X,
+  Send,
+  CheckCircle2,
+  AlertCircle,
+  Info,
+  ChevronDown,
+  ChevronRight,
+} from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 
 /// Telegram bot bridge connect modal. Mirrors LineConnectModal's
@@ -33,6 +41,7 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
   const [allowedUsers, setAllowedUsers] = useState("");
   const [allowedChats, setAllowedChats] = useState("");
   const [requireMention, setRequireMention] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -213,6 +222,42 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
             />
           </label>
 
+          {/* Advanced — collapsed by default. Default (collapsed) =
+              long-poll mode, empty allowlist (open mode — forward all
+              DMs to this bot), require @mention in groups = true. */}
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            className="flex items-center gap-1 text-xs"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            {showAdvanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            Advanced{" "}
+            {!showAdvanced && (
+              <span style={{ color: "var(--text-secondary)", opacity: 0.7 }}>
+                · long-poll · allowlist empty (open)
+              </span>
+            )}
+          </button>
+
+          {showAdvanced && (
+            <>
+              <div
+                className="flex items-start gap-2 p-2 rounded text-xs"
+                style={{
+                  background: "rgba(209,154,102,0.12)",
+                  color: "var(--warning, #d19a66)",
+                }}
+              >
+                <AlertCircle size={12} className="mt-0.5 shrink-0" />
+                <span>
+                  Empty allowlist = <strong>open mode</strong> — any Telegram
+                  user who discovers <code>@{status.bot_username ?? "bot"}</code>{" "}
+                  can DM and drive thClaws. Keep the bot username private, or
+                  add numeric user IDs to lock down.
+                </span>
+              </div>
+
           <div className="space-y-1">
             <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
               Transport mode
@@ -359,6 +404,8 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
               (matches Telegram&apos;s default privacy mode)
             </span>
           </label>
+            </>
+          )}
 
           {error && (
             <div

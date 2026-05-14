@@ -32,8 +32,8 @@ pub async fn route_update(
     } else if let Some(cb) = update.callback_query.as_ref() {
         // Callback gate: sender must appear in the user allowlist
         // (regardless of chat scope — buttons are user-targeted).
-        // Anyone could spam our callback path otherwise.
-        if !allowlist.users.contains(&cb.from.id) {
+        // Open mode (both lists empty) → forward all callbacks too.
+        if !allowlist.is_open() && !allowlist.users.contains(&cb.from.id) {
             return;
         }
     }
@@ -171,5 +171,38 @@ mod tests {
         };
         route_update(&al, sink.clone(), u).await;
         assert!(sink.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_mode_forwards_any_dm() {
+        let sink = Arc::new(Cap::default());
+        let al = Allowlist::default(); // empty = open mode
+        route_update(&al, sink.clone(), msg_update(10, 99, 99, "private")).await;
+        route_update(&al, sink.clone(), msg_update(11, 100, -1234, "supergroup")).await;
+        assert_eq!(sink.seen.lock().unwrap().clone(), vec![10, 11]);
+    }
+
+    #[tokio::test]
+    async fn open_mode_forwards_any_callback() {
+        let sink = Arc::new(Cap::default());
+        let al = Allowlist::default(); // empty = open mode
+        let u = Update {
+            update_id: 12,
+            message: None,
+            channel_post: None,
+            callback_query: Some(CallbackQuery {
+                id: "cb-open".into(),
+                from: User {
+                    id: 999,
+                    is_bot: false,
+                    username: None,
+                    first_name: None,
+                },
+                data: Some("tool:allow:x".into()),
+                message: None,
+            }),
+        };
+        route_update(&al, sink.clone(), u).await;
+        assert_eq!(sink.seen.lock().unwrap().len(), 1);
     }
 }

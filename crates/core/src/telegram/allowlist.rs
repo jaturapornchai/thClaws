@@ -28,9 +28,21 @@ impl Allowlist {
         }
     }
 
+    /// Open mode = both lists empty. Single-owner / dev bots opt into
+    /// this by submitting the setup form without any IDs — the gate
+    /// then forwards everything. Use ONLY when the bot's username is
+    /// kept private and the owner accepts that anyone who discovers
+    /// the bot can drive the agent.
+    pub fn is_open(&self) -> bool {
+        self.users.is_empty() && self.chats.is_empty()
+    }
+
     /// `from_user_id` is the user who SENT the message (DM = chat id
     /// equals user id; group = chat id is the group id).
     pub fn is_allowed(&self, from_user_id: i64, chat: &Chat) -> bool {
+        if self.is_open() {
+            return true;
+        }
         if chat.is_private() {
             self.users.contains(&from_user_id)
         } else if chat.is_group() {
@@ -107,8 +119,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_list_denies_all() {
+    fn empty_list_is_open_mode_allows_all() {
         let a = Allowlist::default();
-        assert!(!a.is_allowed(42, &private_chat(42)));
+        assert!(a.is_open());
+        // DM allowed
+        assert!(a.is_allowed(42, &private_chat(42)));
+        // Group allowed
+        assert!(a.is_allowed(42, &supergroup(-100123)));
+    }
+
+    #[test]
+    fn non_empty_list_disables_open_mode() {
+        let a = Allowlist::from_csv("42", "");
+        assert!(!a.is_open());
     }
 }
