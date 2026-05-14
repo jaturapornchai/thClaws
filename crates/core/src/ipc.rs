@@ -89,6 +89,19 @@ pub struct IpcContext {
 /// The WebSocket transport ignores the return value: anything not
 /// handled here is silently dropped (the WS-side dispatch surface IS
 /// `handle_ipc` — there's no fallback closure to delegate to).
+/// Mask the middle of a Telegram bot token so the GUI can echo a
+/// "saved" preview without exposing the whole secret. Telegram tokens
+/// are `<digits>:<35-char>` — keep the first 4 + last 4 chars.
+fn mask_token(t: &str) -> String {
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() <= 10 {
+        return "•".repeat(chars.len());
+    }
+    let head: String = chars.iter().take(4).collect();
+    let tail: String = chars.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{head}…{tail}")
+}
+
 #[must_use = "callers must consult the returned bool to decide whether to fall through to a transport-specific dispatch"]
 pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
     let ty = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -867,15 +880,29 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             };
 
             let bot_token = pick_str("bot_token");
-            if bot_token.trim().is_empty() {
-                let payload = serde_json::json!({
-                    "type": "telegram_setup_result",
-                    "ok": false,
-                    "error": "bot_token is required",
-                });
-                (ctx.dispatch)(payload.to_string());
-                return true;
-            }
+            // Empty bot_token → use whatever is already in the keychain.
+            // Lets the user click Connect / Reconnect without re-pasting
+            // a previously-saved token. If keychain is empty too, error.
+            let effective_token = if bot_token.trim().is_empty() {
+                match crate::secrets::keychain_get_raw(
+                    crate::telegram::spawn::KEYCHAIN_BOT_TOKEN,
+                )
+                .filter(|s| !s.is_empty())
+                {
+                    Some(saved) => saved,
+                    None => {
+                        let payload = serde_json::json!({
+                            "type": "telegram_setup_result",
+                            "ok": false,
+                            "error": "bot_token is required (no saved token in keychain)",
+                        });
+                        (ctx.dispatch)(payload.to_string());
+                        return true;
+                    }
+                }
+            } else {
+                bot_token.clone()
+            };
             let mode_str = pick_str("mode");
             let mode = if mode_str.eq_ignore_ascii_case("webhook") {
                 crate::telegram::TelegramMode::Webhook
@@ -893,18 +920,27 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 return true;
             }
 
-            if let Err(e) = crate::secrets::keychain_set_raw(
-                crate::telegram::spawn::KEYCHAIN_BOT_TOKEN,
-                &bot_token,
-            ) {
-                let payload = serde_json::json!({
-                    "type": "telegram_setup_result",
-                    "ok": false,
-                    "error": format!("keychain bot_token: {e}"),
-                });
-                (ctx.dispatch)(payload.to_string());
-                return true;
+            // Only write keychain when the user actually provided a new
+            // token (avoid replaying the saved value back into keychain
+            // on every Reconnect — same bytes but unnecessary writes).
+            if !bot_token.trim().is_empty() {
+                if let Err(e) = crate::secrets::keychain_set_raw(
+                    crate::telegram::spawn::KEYCHAIN_BOT_TOKEN,
+                    &bot_token,
+                ) {
+                    let payload = serde_json::json!({
+                        "type": "telegram_setup_result",
+                        "ok": false,
+                        "error": format!("keychain bot_token: {e}"),
+                    });
+                    (ctx.dispatch)(payload.to_string());
+                    return true;
+                }
             }
+            // `effective_token` is now in the keychain (either freshly
+            // saved or already present); `spawn::spawn` loads it via
+            // `load_bot_token` so we don't pass it explicitly.
+            let _ = effective_token;
             if mode == crate::telegram::TelegramMode::Webhook {
                 if let Err(e) = crate::secrets::keychain_set_raw(
                     crate::telegram::spawn::KEYCHAIN_WEBHOOK_SECRET,
@@ -958,6 +994,24 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             let payload = serde_json::json!({
                 "type": "telegram_status",
                 "state": "disconnected",
+            });
+            (ctx.dispatch)(payload.to_string());
+        }
+
+        "telegram_token_status" => {
+            // Frontend asks on modal open: "is a token already saved?"
+            // Reply with masked preview so the UI can show
+            // "Saved: 8716...HZIc — type new to override" without
+            // exposing the full secret to the DOM.
+            let token = crate::secrets::keychain_get_raw(
+                crate::telegram::spawn::KEYCHAIN_BOT_TOKEN,
+            )
+            .filter(|s| !s.is_empty());
+            let preview = token.as_ref().map(|t| mask_token(t));
+            let payload = serde_json::json!({
+                "type": "telegram_token_status",
+                "has_token": token.is_some(),
+                "preview": preview,
             });
             (ctx.dispatch)(payload.to_string());
         }
