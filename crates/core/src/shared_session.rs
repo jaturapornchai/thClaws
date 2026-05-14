@@ -601,24 +601,26 @@ pub struct WorkerState {
     /// the background WS task is running; `line_disconnect` cancels
     /// + clears it.
     pub line_session: Option<crate::line::LineSessionHandle>,
-    /// Plan-07 Phase 2.1: pre-LINE-connect snapshot of the agent's
-    /// permission mode + approver, so `LineDisconnect` can restore
-    /// exactly where the user left off. `Some` only while a LINE
-    /// session is active.
-    pub line_pre_mode: Option<crate::permissions::PermissionMode>,
-    pub line_pre_approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
     /// Active Telegram bridge transport (long-poll loop or webhook
     /// axum server). `Some` only while the bridge is running;
     /// `TelegramDisconnect` cancels + clears it.
     pub telegram_session: Option<crate::telegram::spawn::TelegramHandle>,
-    /// Live `TelegramApprover` while the bridge is connected. Cloned
-    /// into `state.approver` during connect; the sink calls
-    /// `note_chat_id` on it as user messages arrive.
+    /// Live `TelegramApprover` while the bridge is connected. The
+    /// sink calls `note_chat_id` on it as user messages arrive.
     pub telegram_approver: Option<std::sync::Arc<crate::telegram::approver::TelegramApprover>>,
-    /// Pre-Telegram-connect snapshot of permission mode + approver,
-    /// mirror of `line_pre_*`.
-    pub telegram_pre_mode: Option<crate::permissions::PermissionMode>,
-    pub telegram_pre_approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
+    /// Pre-bridge snapshot of permission mode + approver. Captured
+    /// the FIRST time any bridge (LINE or Telegram) connects, restored
+    /// when the LAST bridge disconnects. Subsequent bridge connects
+    /// don't touch this — the `BridgeApprovalRouter` takes care of
+    /// per-turn dispatch instead.
+    pub bridges_pre_mode: Option<crate::permissions::PermissionMode>,
+    pub bridges_pre_approver: Option<std::sync::Arc<dyn crate::permissions::ApprovalSink>>,
+    /// Routing approver installed into `state.approver` while any
+    /// bridge is connected. Dispatches each approval to the bridge
+    /// whose task-local scope is active (LINE_DRIVEN_TURN for LINE,
+    /// CURRENT_CHAT_ID for Telegram), falling back to
+    /// `bridges_pre_approver` when neither scope is set.
+    pub bridge_router: Option<std::sync::Arc<crate::bridge_router::BridgeApprovalRouter>>,
 }
 
 /// M6.29: handle to a running `/loop` task.
@@ -1548,12 +1550,11 @@ async fn run_worker(
         agent_factory: factory_state,
         agent_defs: agent_defs_state,
         line_session: None,
-        line_pre_mode: None,
-        line_pre_approver: None,
         telegram_session: None,
         telegram_approver: None,
-        telegram_pre_mode: None,
-        telegram_pre_approver: None,
+        bridges_pre_mode: None,
+        bridges_pre_approver: None,
+        bridge_router: None,
     };
 
     // M6.35 HOOK2: fire session_start hook now that WorkerState is
@@ -1890,29 +1891,31 @@ async fn run_worker(
                     }
                 };
 
-                // Plan-07 Phase 2.1: swap permission posture to
-                // route approvals through LINE while the bridge
-                // is connected. Stash the pre-existing values so
-                // LineDisconnect can put them back.
-                //
-                // Critical: stash the *AGENT's* permission_mode,
-                // not the global. `rebuild_agent` preserves
-                // `agent.permission_mode` (line 611+627); if we
-                // only update the global via
-                // `set_current_mode_and_broadcast`, the agent
-                // stays in its prior mode (typically `Auto`) and
-                // `agent.permission_mode.asks_for_approval()`
-                // returns false → mutating tools run silently.
-                // This was C3 from the post-deploy audit.
-                if state.line_pre_mode.is_none() {
-                    state.line_pre_mode = Some(state.agent.permission_mode);
-                    state.line_pre_approver = Some(state.approver.clone());
+                // Co-existence model: route approvals through the
+                // `BridgeApprovalRouter` so LINE and Telegram can
+                // coexist without overwriting each other's approver.
+                // The router is installed once (on the first bridge
+                // connect) and dropped when the last bridge
+                // disconnects. C3 fix still applies — we update the
+                // *AGENT's* permission_mode, not just the global.
+                if state.bridge_router.is_none() {
+                    state.bridges_pre_mode = Some(state.agent.permission_mode);
+                    state.bridges_pre_approver = Some(state.approver.clone());
+                    let router = std::sync::Arc::new(
+                        crate::bridge_router::BridgeApprovalRouter::new(
+                            state.approver.clone(),
+                        ),
+                    );
+                    state.bridge_router = Some(router.clone());
+                    state.approver = router
+                        as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
+                }
+                if let Some(router) = state.bridge_router.as_ref() {
+                    router.register_line(handle.approver.clone());
                 }
                 crate::permissions::set_current_mode_and_broadcast(
                     crate::permissions::PermissionMode::LineGated,
                 );
-                state.approver =
-                    handle.approver.clone() as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
                 if let Err(e) = state.rebuild_agent(true) {
                     eprintln!("[line] rebuild_agent after mode swap failed: {e}");
                 }
@@ -1962,21 +1965,29 @@ async fn run_worker(
                 if let Some(handle) = state.line_session.take() {
                     handle.cancel.cancel();
                 }
-                // Plan-07 Phase 2.1: restore the pre-connect mode
-                // + approver so the local Ask/Auto/Plan posture
-                // resumes immediately. No-op if no stash exists
-                // (shouldn't happen, but defensively safe). Same
-                // C3 fix as LineConnect — restore on the AGENT's
-                // permission_mode, not just the global.
-                if let Some(prev_mode) = state.line_pre_mode.take() {
-                    crate::permissions::set_current_mode_and_broadcast(prev_mode);
-                    state.agent.permission_mode = prev_mode;
-                }
-                if let Some(prev_approver) = state.line_pre_approver.take() {
-                    state.approver = prev_approver;
-                    if let Err(e) = state.rebuild_agent(true) {
-                        eprintln!("[line] rebuild_agent after restore failed: {e}");
+                // Co-existence: unregister this bridge from the
+                // router. If Telegram is still connected, leave the
+                // router as state.approver. If this was the last
+                // bridge, restore the pre-bridge approver + mode
+                // (mirrors the original C3 LineDisconnect logic).
+                let router_empty = if let Some(router) = state.bridge_router.as_ref() {
+                    router.unregister_line();
+                    router.is_empty()
+                } else {
+                    true
+                };
+                if router_empty {
+                    if let Some(prev_mode) = state.bridges_pre_mode.take() {
+                        crate::permissions::set_current_mode_and_broadcast(prev_mode);
+                        state.agent.permission_mode = prev_mode;
                     }
+                    if let Some(prev_approver) = state.bridges_pre_approver.take() {
+                        state.approver = prev_approver;
+                        if let Err(e) = state.rebuild_agent(true) {
+                            eprintln!("[line] rebuild_agent after restore failed: {e}");
+                        }
+                    }
+                    state.bridge_router = None;
                 }
                 // Delete the on-disk config so the next worker
                 // boot doesn't auto-reconnect.
@@ -2075,7 +2086,17 @@ async fn run_worker(
                 // user can't see. Cleared after the turn finishes
                 // — back-to-back GUI turns then behave normally.
                 crate::tools::ask::set_line_driven_turn(true);
-                handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self).await;
+                // Co-existence: enter the LINE_DRIVEN_TURN task-local
+                // scope so the `BridgeApprovalRouter` routes any tool
+                // approval prompt to the LineApprover (not to whatever
+                // bridge happens to share state.approver). The scope
+                // covers every await beneath handle_line.
+                crate::line::LINE_DRIVEN_TURN
+                    .scope((), async {
+                        handle_line(text, &mut state, &events_tx, &cancel, &input_tx_self)
+                            .await;
+                    })
+                    .await;
                 crate::tools::ask::set_line_driven_turn(false);
                 let final_text = collector.await.unwrap_or_default();
                 let _ = respond.send(final_text);
@@ -2502,15 +2523,27 @@ async fn run_worker(
                     }
                 };
 
-                if state.telegram_pre_mode.is_none() {
-                    state.telegram_pre_mode = Some(state.agent.permission_mode);
-                    state.telegram_pre_approver = Some(state.approver.clone());
+                // Co-existence: same router pattern as LineConnect.
+                // Install router on the first bridge connect; register
+                // this bridge's approver every time.
+                if state.bridge_router.is_none() {
+                    state.bridges_pre_mode = Some(state.agent.permission_mode);
+                    state.bridges_pre_approver = Some(state.approver.clone());
+                    let router = std::sync::Arc::new(
+                        crate::bridge_router::BridgeApprovalRouter::new(
+                            state.approver.clone(),
+                        ),
+                    );
+                    state.bridge_router = Some(router.clone());
+                    state.approver = router
+                        as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
+                }
+                if let Some(router) = state.bridge_router.as_ref() {
+                    router.register_telegram(approver_for_sink.clone());
                 }
                 crate::permissions::set_current_mode_and_broadcast(
                     crate::permissions::PermissionMode::LineGated,
                 );
-                state.approver = approver_for_sink.clone()
-                    as std::sync::Arc<dyn crate::permissions::ApprovalSink>;
                 if let Err(e) = state.rebuild_agent(true) {
                     eprintln!("[telegram] rebuild_agent after mode swap failed: {e}");
                 }
@@ -2542,15 +2575,26 @@ async fn run_worker(
                     handle.cancel.cancel();
                 }
                 state.telegram_approver = None;
-                if let Some(prev_mode) = state.telegram_pre_mode.take() {
-                    crate::permissions::set_current_mode_and_broadcast(prev_mode);
-                    state.agent.permission_mode = prev_mode;
-                }
-                if let Some(prev_approver) = state.telegram_pre_approver.take() {
-                    state.approver = prev_approver;
-                    if let Err(e) = state.rebuild_agent(true) {
-                        eprintln!("[telegram] rebuild_agent after restore failed: {e}");
+                // Co-existence: unregister; if router is now empty,
+                // restore the pre-bridge approver + mode.
+                let router_empty = if let Some(router) = state.bridge_router.as_ref() {
+                    router.unregister_telegram();
+                    router.is_empty()
+                } else {
+                    true
+                };
+                if router_empty {
+                    if let Some(prev_mode) = state.bridges_pre_mode.take() {
+                        crate::permissions::set_current_mode_and_broadcast(prev_mode);
+                        state.agent.permission_mode = prev_mode;
                     }
+                    if let Some(prev_approver) = state.bridges_pre_approver.take() {
+                        state.approver = prev_approver;
+                        if let Err(e) = state.rebuild_agent(true) {
+                            eprintln!("[telegram] rebuild_agent after restore failed: {e}");
+                        }
+                    }
+                    state.bridge_router = None;
                 }
                 let payload = serde_json::json!({
                     "type": "telegram_status",

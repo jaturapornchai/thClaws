@@ -35,13 +35,25 @@ pub enum PermissionMode {
     /// corrects on the next turn. The user retains the sidebar Cancel
     /// button as a per-plan escape hatch.
     Plan,
-    /// LINE-gated (plan-07 Phase 1.2) — semantically identical to
-    /// `Ask` for *what* gets gated (every tool whose
-    /// `requires_approval` returns true), but the approval prompt
-    /// is routed to the user's LINE chat via the `LineApprover`
-    /// sink rather than the local REPL / GUI modal. Lets a user
-    /// approve agent-initiated mutations from their phone when the
-    /// LINE bridge is active.
+    /// Bridge-gated. Semantically identical to `Ask` for *what* gets
+    /// gated (every tool whose `requires_approval` returns true),
+    /// but the approval prompt is routed to whichever external
+    /// messaging bridge is currently driving the turn:
+    /// - LINE (`LineApprover`) when the worker is inside the
+    ///   `crate::line::LINE_DRIVEN_TURN` task-local scope.
+    /// - Telegram (`TelegramApprover`) when inside
+    ///   `crate::telegram::CURRENT_CHAT_ID` scope.
+    /// - The pre-bridge approver (GUI modal / REPL) when neither
+    ///   scope is set.
+    ///
+    /// Dispatch is handled by `crate::bridge_router::BridgeApprovalRouter`,
+    /// which is installed into `state.approver` while any bridge is
+    /// connected and dropped when the last bridge disconnects.
+    ///
+    /// Variant name `LineGated` is kept for backward compatibility
+    /// with persisted config + serialized session state; the
+    /// "LINE" in the name is historical and no longer reflects
+    /// the routing contract.
     LineGated,
 }
 
