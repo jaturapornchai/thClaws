@@ -40,6 +40,12 @@ pub mod ipc;
 pub mod kms;
 pub mod line;
 pub mod telegram;
+/// Routes `ApprovalSink` calls to the LINE or Telegram bridge based
+/// on ambient task-local context so both bridges can be connected
+/// simultaneously without their approver pointers overwriting each
+/// other.
+#[cfg(feature = "gui")]
+pub mod bridge_router;
 /// ChatGPT OAuth device-code flow for the `chatgpt-codex` provider.
 pub mod login_codex;
 pub mod marketplace;

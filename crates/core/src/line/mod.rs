@@ -39,6 +39,15 @@ pub mod mode;
 pub mod protocol;
 pub mod session;
 
+// Marker task-local set by the `ShellInput::LineMessage` worker arm
+// so `BridgeApprovalRouter` can detect that the current agent turn
+// originated from LINE and route approval prompts to the LineApprover
+// instead of the global state.approver. Value is unit — only the
+// presence of the scope matters. Mirrors `crate::telegram::CURRENT_CHAT_ID`.
+tokio::task_local! {
+    pub static LINE_DRIVEN_TURN: ();
+}
+
 pub use approver::{ApprovalReply, LineApprover};
 #[cfg(feature = "gui")]
 pub use bootstrap::{LineSessionHandle, LineStatus};
