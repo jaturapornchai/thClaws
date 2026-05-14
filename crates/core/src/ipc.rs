@@ -736,6 +736,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     picture_url: picture_url.clone(),
                     language,
                     direct: None,
+                    auto_approve_all: false,
                 };
                 if let Err(e) = cfg.save() {
                     let payload = serde_json::json!({
@@ -835,6 +836,10 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 allowed_groups_csv: pick_str("allowed_groups"),
                 allowed_rooms_csv: pick_str("allowed_rooms"),
             };
+            let auto_approve_all = msg
+                .get("auto_approve_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let cfg = crate::line::LineConfig {
                 binding_token: String::new(),
                 mode: crate::line::LineMode::SelfHosted,
@@ -843,6 +848,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 picture_url: None,
                 language: None,
                 direct: Some(direct),
+                auto_approve_all,
             };
             if let Err(e) = cfg.save() {
                 let payload = serde_json::json!({
@@ -994,6 +1000,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                 require_mention_in_groups: pick_bool("require_mention_in_groups", true),
                 allow_open_mode,
                 allow_any_user_in_group,
+                auto_approve_all: pick_bool("auto_approve_all", false),
             };
 
             // P7: persist non-secret settings so the next worker boot
@@ -1059,6 +1066,7 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
                     "require_mention_in_groups": cfg.require_mention_in_groups,
                     "allow_open_mode": cfg.allow_open_mode,
                     "allow_any_user_in_group": cfg.allow_any_user_in_group,
+                    "auto_approve_all": cfg.auto_approve_all,
                 }),
                 Ok(None) => serde_json::json!({
                     "type": "telegram_config_status",

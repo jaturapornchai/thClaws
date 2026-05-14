@@ -42,6 +42,7 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
   const [allowedGroups, setAllowedGroups] = useState("");
   const [allowedRooms, setAllowedRooms] = useState("");
   const [threshold, setThreshold] = useState("45");
+  const [autoApproveAll, setAutoApproveAll] = useState(false);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -113,6 +114,7 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
       allowed_groups: allowedGroups.trim(),
       allowed_rooms: allowedRooms.trim(),
       slow_response_threshold_secs: parseInt(threshold, 10) || 45,
+      auto_approve_all: autoApproveAll,
     });
   };
 
@@ -204,6 +206,8 @@ export function LineConnectModal({ onClose }: { onClose: () => void }) {
                   setAllowedRooms={setAllowedRooms}
                   threshold={threshold}
                   setThreshold={setThreshold}
+                  autoApproveAll={autoApproveAll}
+                  setAutoApproveAll={setAutoApproveAll}
                   webhookHint={webhookHint}
                   busy={busy}
                   error={error}
@@ -327,6 +331,8 @@ function SelfHostedForm({
   setAllowedRooms,
   threshold,
   setThreshold,
+  autoApproveAll,
+  setAutoApproveAll,
   webhookHint,
   busy,
   error,
@@ -350,6 +356,8 @@ function SelfHostedForm({
   setAllowedRooms: (s: string) => void;
   threshold: string;
   setThreshold: (s: string) => void;
+  autoApproveAll: boolean;
+  setAutoApproveAll: (v: boolean) => void;
   webhookHint: string;
   busy: boolean;
   error: string | null;
@@ -467,6 +475,23 @@ function SelfHostedForm({
           style={inputStyle}
         />
       </Field>
+
+      <label className="flex items-start gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={autoApproveAll}
+          onChange={(e) => setAutoApproveAll(e.target.checked)}
+          className="mt-0.5"
+        />
+        <span className="text-xs">
+          <strong style={{ color: "var(--warning, #d19a66)" }}>
+            Auto-approve all tools
+          </strong>{" "}
+          — skip in-chat Approve/Deny. Every tool call (Bash, Edit,
+          Write, etc.) runs without confirmation while this bridge
+          is connected.
+        </span>
+      </label>
 
       <ErrorBanner error={error} />
 

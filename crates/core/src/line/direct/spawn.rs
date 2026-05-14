@@ -36,6 +36,13 @@ pub struct DirectHandle {
     pub threshold: Duration,
 }
 
+/// Public wrapper so `line::bootstrap` can resolve the access token
+/// before calling `spawn_with_stores`. Mirrors
+/// `telegram::spawn::load_bot_token_pub`.
+pub fn load_access_token_pub() -> Result<String, DirectLineError> {
+    load_access_token()
+}
+
 fn load_access_token() -> Result<String, DirectLineError> {
     if let Ok(v) = std::env::var("LINE_CHANNEL_ACCESS_TOKEN") {
         if !v.is_empty() {
@@ -64,21 +71,39 @@ fn load_channel_secret() -> Result<String, DirectLineError> {
     Err(DirectLineError::MissingSecret)
 }
 
-/// Bind the webhook server and return a handle. Caller is the
-/// worker's `LineConnect` arm (via `bootstrap::spawn`) — it stashes
-/// the handle on `state.line_session` and cancels via the token on
-/// `LineDisconnect`.
+/// Bind the webhook server and return a handle. Constructs all the
+/// shared state (client, reply_store, slow_cache, dedup) internally.
+/// Callers that need to share these stores with a sink built outside
+/// (typical for the real `DirectSink`) should use
+/// [`spawn_with_stores`] instead — passing pre-allocated Arcs avoids
+/// the trap where the sink and the server hold different store Arcs
+/// and the reply path silently never sees the inbound token.
 pub async fn spawn(
     config: DirectConfig,
     sink: Arc<dyn DirectEventSink>,
 ) -> Result<DirectHandle, DirectLineError> {
     let access_token = load_access_token()?;
-    let secret = load_channel_secret()?;
-
     let client = Arc::new(DirectLineClient::new(access_token)?);
     let reply_store = Arc::new(ReplyTokenStore::new());
     let slow_cache = Arc::new(SlowResponseCache::new());
     let dedup = Arc::new(DedupStore::new());
+    spawn_with_stores(config, sink, client, reply_store, slow_cache, dedup).await
+}
+
+/// Same as [`spawn`] but the caller supplies the shared state. Used
+/// by `line::bootstrap` so the `DirectSink` it builds can hold the
+/// SAME `Arc<ReplyTokenStore>` the running server writes to — without
+/// this, the sink's `store.take(chat)` always returned None and every
+/// reply path logged `drop: NoValidReplyToken`.
+pub async fn spawn_with_stores(
+    config: DirectConfig,
+    sink: Arc<dyn DirectEventSink>,
+    client: Arc<DirectLineClient>,
+    reply_store: Arc<ReplyTokenStore>,
+    slow_cache: Arc<SlowResponseCache>,
+    dedup: Arc<DedupStore>,
+) -> Result<DirectHandle, DirectLineError> {
+    let secret = load_channel_secret()?;
     let threshold = config.threshold();
 
     let state = Arc::new(DirectServerState {

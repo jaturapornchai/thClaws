@@ -57,6 +57,13 @@ pub struct TelegramConfig {
     /// auth requires BOTH chat_id AND sender user_id (P4 fail-closed).
     #[serde(default)]
     pub allow_any_user_in_group: bool,
+    /// Skip per-tool approval gating entirely while this bridge is
+    /// connected. When `true`, the worker leaves the permission mode
+    /// at `Auto` instead of swapping to `LineGated`, so every tool
+    /// call runs without prompting Telegram. Use for single-owner
+    /// trusted bots.
+    #[serde(default)]
+    pub auto_approve_all: bool,
 }
 
 fn default_long_poll_timeout() -> u64 {
@@ -82,6 +89,7 @@ impl Default for TelegramConfig {
             require_mention_in_groups: true,
             allow_open_mode: false,
             allow_any_user_in_group: false,
+            auto_approve_all: false,
         }
     }
 }
@@ -125,6 +133,9 @@ impl TelegramConfig {
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
             allow_any_user_in_group: std::env::var("TELEGRAM_ALLOW_ANY_USER_IN_GROUP")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
+            auto_approve_all: std::env::var("TELEGRAM_AUTO_APPROVE_ALL")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
         }

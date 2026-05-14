@@ -43,6 +43,7 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
   const [requireMention, setRequireMention] = useState(true);
   const [allowOpenMode, setAllowOpenMode] = useState(false);
   const [allowAnyUserInGroup, setAllowAnyUserInGroup] = useState(false);
+  const [autoApproveAll, setAutoApproveAll] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   /// Token preview shown next to the bot-token input when a token is
   /// already saved in the OS keychain. User can type a new token to
@@ -117,6 +118,9 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
           if (typeof msg.allow_any_user_in_group === "boolean") {
             setAllowAnyUserInGroup(msg.allow_any_user_in_group as boolean);
           }
+          if (typeof msg.auto_approve_all === "boolean") {
+            setAutoApproveAll(msg.auto_approve_all as boolean);
+          }
           // Open Advanced if anything beyond bare defaults is saved
           // so the user can see at-a-glance what's already locked in.
           const nonDefault =
@@ -176,6 +180,7 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
       require_mention_in_groups: requireMention,
       allow_open_mode: allowOpenMode,
       allow_any_user_in_group: allowAnyUserInGroup,
+      auto_approve_all: autoApproveAll,
     });
   };
 
@@ -527,6 +532,22 @@ export function TelegramConnectModal({ onClose }: { onClose: () => void }) {
               Allow any user in allow-listed groups (skip sender
               user_id check inside groups — chat membership is the
               only gate)
+            </span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoApproveAll}
+              onChange={(e) => setAutoApproveAll(e.target.checked)}
+            />
+            <span className="text-xs">
+              <strong style={{ color: "var(--warning, #d19a66)" }}>
+                Auto-approve all tools
+              </strong>{" "}
+              — skip the in-chat Approve/Deny prompt. Every tool call
+              (including Bash/Edit/Write) runs without confirmation
+              while this bridge is connected.
             </span>
           </label>
             </>

@@ -1868,6 +1868,7 @@ async fn run_worker(
                 // can render the display name + avatar.
                 let pair_display_name = line_cfg.display_name.clone();
                 let pair_picture_url = line_cfg.picture_url.clone();
+                let line_auto_approve = line_cfg.auto_approve_all;
                 let handle = match crate::line::bootstrap::spawn(
                     line_cfg, input_tx_self.clone(),
                 )
@@ -1913,17 +1914,20 @@ async fn run_worker(
                 if let Some(router) = state.bridge_router.as_ref() {
                     router.register_line(handle.approver.clone());
                 }
-                crate::permissions::set_current_mode_and_broadcast(
-                    crate::permissions::PermissionMode::LineGated,
-                );
+                // Honour the operator's "Auto-approve all tools" opt-in.
+                // When set, leave the agent in `Auto` so tool calls run
+                // without prompting LINE; otherwise gate every mutating
+                // tool through the BridgeApprovalRouter (LineGated).
+                let target_mode = if line_auto_approve {
+                    crate::permissions::PermissionMode::Auto
+                } else {
+                    crate::permissions::PermissionMode::LineGated
+                };
+                crate::permissions::set_current_mode_and_broadcast(target_mode);
                 if let Err(e) = state.rebuild_agent(true) {
                     eprintln!("[line] rebuild_agent after mode swap failed: {e}");
                 }
-                // Force the rebuilt agent into LineGated. Without
-                // this, `rebuild_agent`'s prev_perm restore puts
-                // the agent back into whatever mode it was in
-                // before the connect.
-                state.agent.permission_mode = crate::permissions::PermissionMode::LineGated;
+                state.agent.permission_mode = target_mode;
 
                 let mode_str = match handle.mode {
                     crate::line::LineMode::Hosted => "hosted",
@@ -2498,6 +2502,7 @@ async fn run_worker(
                         None
                     }
                 };
+                let tg_auto_approve = tg_cfg.auto_approve_all;
                 let sink: std::sync::Arc<dyn crate::telegram::long_poll::TelegramUpdateSink> =
                     std::sync::Arc::new(crate::telegram::sink::TelegramSink {
                         input_tx: input_tx_self.clone(),
@@ -2541,14 +2546,18 @@ async fn run_worker(
                 if let Some(router) = state.bridge_router.as_ref() {
                     router.register_telegram(approver_for_sink.clone());
                 }
-                crate::permissions::set_current_mode_and_broadcast(
-                    crate::permissions::PermissionMode::LineGated,
-                );
+                // Honour the operator's "Auto-approve all tools" opt-in
+                // for this bridge. Mirrors LINE arm.
+                let target_mode = if tg_auto_approve {
+                    crate::permissions::PermissionMode::Auto
+                } else {
+                    crate::permissions::PermissionMode::LineGated
+                };
+                crate::permissions::set_current_mode_and_broadcast(target_mode);
                 if let Err(e) = state.rebuild_agent(true) {
                     eprintln!("[telegram] rebuild_agent after mode swap failed: {e}");
                 }
-                state.agent.permission_mode =
-                    crate::permissions::PermissionMode::LineGated;
+                state.agent.permission_mode = target_mode;
 
                 let mode_str = match handle.mode {
                     crate::telegram::TelegramMode::LongPoll => "long_poll",

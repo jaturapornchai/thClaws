@@ -58,6 +58,14 @@ pub struct LineConfig {
     /// Self-hosted bridge settings. `None` in `Hosted` mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct: Option<crate::line::direct::config::DirectConfig>,
+    /// Skip per-tool approval gating entirely while this bridge is
+    /// connected. When `true`, the worker leaves the permission mode
+    /// at `Auto` instead of swapping to `LineGated`, so every tool
+    /// call runs without prompting LINE. Use for single-owner trusted
+    /// bots where the user accepts the trade-off of no in-LINE
+    /// approval UI for any mutating action.
+    #[serde(default)]
+    pub auto_approve_all: bool,
 }
 
 impl LineConfig {

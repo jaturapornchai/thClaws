@@ -215,57 +215,46 @@ async fn spawn_self_hosted(
     // passing them to spawn via constructor injection.
     //
     // To keep the data flow obvious, we replicate that strategy: we
-    // build the dependencies here, hand the sink, hand them again
-    // into spawn (which constructs its OWN matching ServerState
-    // because Arc<DirectServerState> is built internally). Spawn
-    // exposes its constructed Arc<>s back to us via DirectHandle so
-    // the sink reads/writes the same caches the server does.
+    // Build every shared dependency (client + stores) OUT HERE, then
+    // hand them into a single `spawn_with_stores` call. Sink and
+    // server then read/write the SAME Arc<ReplyTokenStore> — without
+    // this, the older placeholder-then-respawn dance built two
+    // disjoint stores and every reply silently dropped with
+    // `NoValidReplyToken`.
+    let access_token = super::direct::spawn::load_access_token_pub()
+        .map_err(|e| format!("self_hosted access_token: {e}"))?;
+    let client = Arc::new(
+        super::direct::client::DirectLineClient::new(access_token)
+            .map_err(|e| format!("self_hosted client init: {e}"))?,
+    );
+    let reply_store = Arc::new(super::direct::reply_store::ReplyTokenStore::new());
+    let slow_cache = Arc::new(super::direct::slow_response::SlowResponseCache::new());
+    let dedup = Arc::new(super::direct::dedup::DedupStore::new());
 
-    let sink_placeholder: Arc<dyn super::direct::server::DirectEventSink> =
-        Arc::new(NoopSink::default());
-    let direct_handle = super::direct::spawn::spawn(direct_config.clone(), sink_placeholder)
-        .await
-        .map_err(|e| format!("self_hosted spawn: {e}"))?;
-
-    // Build the approver early so the real sink can hold an Arc to
-    // it — the approval postback path goes sink → approver directly
-    // (no input_tx hop, same deadlock-fix reasoning as Telegram).
     let approver = Arc::new(LineApprover::for_self_hosted(
-        direct_handle.client.clone(),
-        direct_handle.reply_store.clone(),
+        client.clone(),
+        reply_store.clone(),
     ));
-    // Real sink that reads/writes the SAME stores the server holds.
     let real_sink: Arc<dyn super::direct::server::DirectEventSink> = Arc::new(
         DirectSink::new(
             input_tx,
-            direct_handle.client.clone(),
-            direct_handle.reply_store.clone(),
-            direct_handle.slow_cache.clone(),
-            direct_handle.threshold,
+            client.clone(),
+            reply_store.clone(),
+            slow_cache.clone(),
+            direct_config.threshold(),
         )
         .with_approver(approver.clone()),
     );
-    // Swap the placeholder for the real sink. The server's state
-    // holds a trait object; the swap is atomic at the Arc level.
-    // (Internally `DirectServerState.sink` is `Arc<dyn ...>` and
-    // referenced via `state.sink.on_message(...)`. Server thread
-    // reads through state.sink every request; once we re-init
-    // state.sink to point at real_sink, all subsequent requests see
-    // it.)
-    //
-    // We do not have direct access to the running server's state to
-    // re-bind — so we use a `OnceCell`-style swap exposed by
-    // DirectHandle. Simpler: have spawn take the real sink at
-    // construction. The placeholder dance above is therefore an
-    // artefact — refactor: take the closure that builds the sink
-    // from the stores.
-    //
-    // For Phase B we cancel + respawn with the real sink.
-    direct_handle.cancel.cancel();
-    let _ = direct_handle.join.await;
-    let direct_handle = super::direct::spawn::spawn(direct_config.clone(), real_sink)
-        .await
-        .map_err(|e| format!("self_hosted respawn: {e}"))?;
+    let direct_handle = super::direct::spawn::spawn_with_stores(
+        direct_config.clone(),
+        real_sink,
+        client.clone(),
+        reply_store.clone(),
+        slow_cache.clone(),
+        dedup.clone(),
+    )
+    .await
+    .map_err(|e| format!("self_hosted spawn: {e}"))?;
 
     let server_url = direct_config.webhook_display_url();
     let cancel = direct_handle.cancel.clone();
